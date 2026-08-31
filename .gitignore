@@ -1,0 +1,14 @@
+# local kubeconfig / secrets — never commit
+*.kubeconfig
+admin.conf
+kubeconfig
+.env
+
+# generated join commands (contain cluster tokens)
+config/join-*.sh
+
+# editor / OS cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.bak
