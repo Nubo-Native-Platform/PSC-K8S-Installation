@@ -6,7 +6,7 @@
 Kubernetes installation and lifecycle tooling for the Nubo Native Platform.
 A simple, self-contained toolkit to **install, grow, upgrade, and tear down**
 production-style Kubernetes clusters on your own Linux servers — built on
-**kubeadm + containerd**. No Rancher, no cloud, no paid tools.
+**kubeadm + containerd**. 
 
 It gives you two ways to work:
 
