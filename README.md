@@ -246,6 +246,14 @@ list in `inventory.conf`:
 In the one-liner setup, choose it explicitly with `HA_MODE=single|multi`.
 
 > HA needs an **odd** number of masters (1, 3, 5) so etcd can keep quorum.
+
+**Masters run control-plane components only.** kubeadm taints every control-plane
+node with `node-role.kubernetes.io/control-plane:NoSchedule`, so the scheduler
+keeps your application pods off the masters — they land on the workers. Only
+required system pods that tolerate the taint (etcd, API server, controller
+manager, scheduler, kube-proxy, and the CNI DaemonSet) run on masters. Don't add
+a blanket toleration for that taint to app workloads if you want to preserve
+this separation.
 > **3 masters is the typical HA size** and is what the bundled
 > [`prod1-cluster.conf`](prod1-cluster.conf) example uses (3 masters + 5 workers).
 
