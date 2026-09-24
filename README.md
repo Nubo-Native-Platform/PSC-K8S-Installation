@@ -447,6 +447,12 @@ sudo NFS_CIDR=192.168.18.0/24 ./scripts/nfs-server-setup.sh
 > to `false` only if you want a PVC delete to hard-remove data. (This does not
 > protect against deleting the whole NFS export — keep backups of the server, and
 > use RBAC to limit who can delete PVCs.)
+>
+> To stop archives growing forever, a **retention CronJob** keeps only the last
+> `NFS_ARCHIVE_RETENTION` archived copies **per PVC** (default 3) and prunes older
+> ones on `NFS_ARCHIVE_PRUNE_SCHEDULE` (default daily) — so you always have a
+> recovery window without unbounded storage. Set `NFS_ARCHIVE_RETENTION=0` to keep
+> everything.
 
 **2) Point the cluster at it.** Orchestrated — in your inventory:
 ```ini
@@ -664,6 +670,8 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `NFS_PATH` | `/srv/nfs/k8s` | exported directory on the NFS server |
 | `NFS_SC_NAME` | `nfs-client` | StorageClass name to create (NFS) |
 | `NFS_ARCHIVE_ON_DELETE` | `true` | on PVC delete, **archive** (rename) the data instead of wiping it — protects against accidental deletion |
+| `NFS_ARCHIVE_RETENTION` | `3` | keep only the last N archived copies per PVC (a CronJob prunes older); `0` = keep all |
+| `NFS_ARCHIVE_PRUNE_SCHEDULE` | `0 2 * * *` | cron schedule for the archive-retention job |
 | `NFS_SETUP` | `false` | `true` = `deploy.sh` sets up the NFS server on `NFS_SERVER` automatically |
 | `NFS_CIDR` | auto | network allowed to mount the NFS export (e.g. `192.168.18.0/24`) |
 | `NFS_SSH_USER` | `SSH_USER` | SSH user for the NFS host (if different) |

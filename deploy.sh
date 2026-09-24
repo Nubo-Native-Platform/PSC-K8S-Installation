@@ -95,6 +95,8 @@ LONGHORN_VERSION="${SET[LONGHORN_VERSION]:-v1.10.0}"
 NFS_SERVER="${SET[NFS_SERVER]:-}"; NFS_PATH="${SET[NFS_PATH]:-/srv/nfs/k8s}"
 NFS_SC_NAME="${SET[NFS_SC_NAME]:-nfs-client}"
 NFS_ARCHIVE_ON_DELETE="${SET[NFS_ARCHIVE_ON_DELETE]:-true}"   # keep data on accidental PVC delete
+NFS_ARCHIVE_RETENTION="${SET[NFS_ARCHIVE_RETENTION]:-3}"      # keep last N archived copies per PVC (0=all)
+NFS_ARCHIVE_PRUNE_SCHEDULE="${SET[NFS_ARCHIVE_PRUNE_SCHEDULE]:-0 2 * * *}"
 [[ "$STORAGE" == nfs && -z "$NFS_SERVER" ]] && die "STORAGE=nfs — set NFS_SERVER (NFS server IP) in inventory.conf"
 
 # Fetch the admin kubeconfig to this machine at the end of install? (true|false)
@@ -224,7 +226,7 @@ envstr(){
 
 # env prefix for the storage step (Longhorn or NFS provisioner)
 storage_envstr(){
-  echo "STORAGE='$STORAGE' LONGHORN_VERSION='$LONGHORN_VERSION' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' NFS_SC_NAME='$NFS_SC_NAME' NFS_ARCHIVE_ON_DELETE='$NFS_ARCHIVE_ON_DELETE'"
+  echo "STORAGE='$STORAGE' LONGHORN_VERSION='$LONGHORN_VERSION' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' NFS_SC_NAME='$NFS_SC_NAME' NFS_ARCHIVE_ON_DELETE='$NFS_ARCHIVE_ON_DELETE' NFS_ARCHIVE_RETENTION='$NFS_ARCHIVE_RETENTION' NFS_ARCHIVE_PRUNE_SCHEDULE='$NFS_ARCHIVE_PRUNE_SCHEDULE'"
 }
 
 print_plan(){
