@@ -233,6 +233,7 @@ credentials and is git-ignored — keep it safe.)
 ./deploy.sh storage             # (re)install storage only
 ./deploy.sh metrics             # install metrics-server (HPA + kubectl top)
 ./deploy.sh vpa                 # install the Vertical Pod Autoscaler
+./deploy.sh prometheus          # install Prometheus (no Grafana)
 ./deploy.sh knative             # install Knative (Serving/Eventing) on Istio
 ./deploy.sh argocd              # install Argo CD (GitOps)
 ./deploy.sh openbao             # install OpenBao (HA Raft secret manager)
@@ -651,6 +652,9 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `METRICS_SERVER` | `true` | install metrics-server (needed for HPA + `kubectl top`) |
 | `VPA` | `true` | install the Vertical Pod Autoscaler (recommender/updater/admission) |
 | `VPA_VERSION` | `1.8.0` | pinned VPA release |
+| `PROMETHEUS` | `true` | install kube-prometheus-stack **without Grafana** (Prometheus/Alertmanager/node-exporter/kube-state-metrics) |
+| `PROMETHEUS_RETENTION` | `7d` | Prometheus local retention |
+| `PROMETHEUS_STORAGE_CLASS` | *(emptyDir)* | persist the TSDB on a **local/block** SC (avoid NFS); empty = ephemeral |
 | `KNATIVE` | `true` | `true` = install Knative + Istio during `./deploy.sh` |
 | `KNATIVE_EVENTING` | `true` | also install Knative Eventing (brokers/triggers) |
 | `ISTIO_VERSION` / `KNATIVE_VERSION` | `1.31.1` / `knative-v1.23.0` | pinned versions |
@@ -704,6 +708,7 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `scripts/lb-haproxy-setup.sh` | stand up an HAProxy control-plane LB for HA |
 | `scripts/09-metrics-server.sh` | install metrics-server (HPA + `kubectl top`) |
 | `scripts/10-vpa.sh` | install the Vertical Pod Autoscaler |
+| `scripts/11-prometheus.sh` | install Prometheus (kube-prometheus-stack, no Grafana) |
 | `scripts/06-knative-istio.sh` | install Knative (Serving/Eventing) on Istio + sidecar injection |
 | `scripts/07-argocd.sh` | install Argo CD (GitOps continuous delivery) |
 | `scripts/08-openbao.sh` | install OpenBao (HA Raft secret manager) + init/unseal |

@@ -122,6 +122,11 @@ METRICS_SERVER_VERSION="${SET[METRICS_SERVER_VERSION]:-latest}"
 VPA="${SET[VPA]:-true}"                           # Vertical Pod Autoscaler (default on)
 VPA_VERSION="${SET[VPA_VERSION]:-1.8.0}"
 
+# ---- Monitoring: Prometheus (no Grafana) -----------------------------------
+PROMETHEUS="${SET[PROMETHEUS]:-true}"
+PROMETHEUS_RETENTION="${SET[PROMETHEUS_RETENTION]:-7d}"
+PROMETHEUS_STORAGE_CLASS="${SET[PROMETHEUS_STORAGE_CLASS]:-}"
+
 # ---- Knative + Istio (optional) --------------------------------------------
 KNATIVE="${SET[KNATIVE]:-true}"                  # installed by default; set false to skip
 KNATIVE_EVENTING="${SET[KNATIVE_EVENTING]:-true}"
@@ -299,6 +304,7 @@ cmd_install(){
   step "DONE"; rsh "$M0" "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide" || true
   [[ "$METRICS_SERVER" == true ]] && cmd_metrics
   [[ "$VPA" == true ]] && cmd_vpa
+  [[ "$PROMETHEUS" == true ]] && cmd_prometheus
   [[ "$KNATIVE" == true ]] && cmd_knative
   [[ "$ARGOCD" == true ]] && cmd_argocd
   [[ "$OPENBAO" == true ]] && cmd_openbao
@@ -338,6 +344,14 @@ cmd_metrics(){
   local M0="${M_IP[0]}"; step "installing metrics-server (via $M0)"
   push_as "$SSH_USER" "$M0" "$HERE/scripts/09-metrics-server.sh"
   rsh "$M0" "sudo METRICS_SERVER_VERSION='$METRICS_SERVER_VERSION' bash /tmp/09-metrics-server.sh"
+}
+
+# Install Prometheus (no Grafana), via the first master.
+cmd_prometheus(){
+  [[ -f "$HERE/scripts/11-prometheus.sh" ]] || die "scripts/11-prometheus.sh not found"
+  local M0="${M_IP[0]}"; step "installing Prometheus (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/11-prometheus.sh"
+  rsh "$M0" "sudo PROMETHEUS_RETENTION='$PROMETHEUS_RETENTION' PROMETHEUS_STORAGE_CLASS='$PROMETHEUS_STORAGE_CLASS' bash /tmp/11-prometheus.sh"
 }
 
 # Install the Vertical Pod Autoscaler, via the first master.
@@ -454,11 +468,12 @@ case "$ACTION" in
   storage)    cmd_storage ;;
   metrics)    cmd_metrics ;;
   vpa)        cmd_vpa ;;
+  prometheus) cmd_prometheus ;;
   knative)    cmd_knative ;;
   argocd)     cmd_argocd ;;
   openbao)    cmd_openbao ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | knative | argocd | openbao | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | kubeconfig | upgrade <ver> | reset)";;
 esac
