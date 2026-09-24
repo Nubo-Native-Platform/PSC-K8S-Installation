@@ -33,6 +33,7 @@ Both use the **same engine** (`k8s.sh`), so you can mix them.
 - [Knative (Serving + Eventing) on Istio](#knative-serving--eventing-on-istio)
 - [Argo CD (GitOps)](#argo-cd-gitops)
 - [OpenBao (secret manager)](#openbao-secret-manager)
+- [Backups to S3 (Velero + raw NFS sync)](#backups-to-s3-velero--raw-nfs-sync)
 - [Upgrading](#upgrading)
 - [Tear down / reset](#tear-down--reset)
 - [Configuration reference](#configuration-reference)
@@ -234,6 +235,8 @@ credentials and is git-ignored — keep it safe.)
 ./deploy.sh metrics             # install metrics-server (HPA + kubectl top)
 ./deploy.sh vpa                 # install the Vertical Pod Autoscaler
 ./deploy.sh prometheus          # install Prometheus (no Grafana)
+./deploy.sh velero              # install Velero, back up cluster + PV data to S3
+./deploy.sh nfs-s3-sync         # CronJob: sync the raw NFS export to S3
 ./deploy.sh knative             # install Knative (Serving/Eventing) on Istio
 ./deploy.sh argocd              # install Argo CD (GitOps)
 ./deploy.sh openbao             # install OpenBao (HA Raft secret manager)
@@ -608,6 +611,35 @@ bao kv put secret/demo hello=world && bao kv get secret/demo
 
 ---
 
+## Backups to S3 (Velero + raw NFS sync)
+
+Two complementary backups, both to **AWS S3**. Put the bucket + credentials in a
+**private `*.local.conf`** (git-ignored) — never in a committed file.
+
+**Velero** — Kubernetes-native backup of resources **and** persistent-volume data
+(via File System Backup, so NFS-backed PVCs are copied to S3):
+```bash
+./deploy.sh velero      # with VELERO=true + VELERO_BUCKET/AWS_* set in your inventory
+```
+It installs Velero + the node agent, sets an S3 backup location, and creates a
+daily schedule. Restore-tested workflow:
+```bash
+velero backup create test --wait
+velero restore create --from-backup test
+```
+
+**Raw NFS→S3 sync** — a file-level copy of the whole export, independent of
+Kubernetes:
+```bash
+./deploy.sh nfs-s3-sync # with NFS_S3_SYNC=true + NFS_S3_BUCKET/AWS_* set
+```
+Creates a CronJob that `aws s3 sync`s `/srv/nfs/k8s` to `s3://<bucket>/<prefix>/`.
+
+> Inventory keys: `VELERO`, `VELERO_BUCKET`, `NFS_S3_SYNC`, `NFS_S3_BUCKET`,
+> `NFS_S3_PREFIX`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
+
+---
+
 ## Upgrading
 
 Kubernetes only supports moving **one minor at a time** (1.36 → 1.37, not
@@ -672,6 +704,10 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `OPENBAO_REPLICAS` | `3` | Raft voters (3 or 5) |
 | `OPENBAO_INGRESS_TYPE` | `ClusterIP` | `ClusterIP` or `NodePort` for the OpenBao service |
 | `OPENBAO_STORAGE_CLASS` | *(default SC)* | StorageClass for Raft data (use local/block for production) |
+| `VELERO` | `false` | back up cluster + PV data to S3 with Velero (needs S3 creds) |
+| `NFS_S3_SYNC` | `false` | CronJob that syncs the raw NFS export to S3 |
+| `VELERO_BUCKET` / `NFS_S3_BUCKET` | *(none)* | target S3 bucket(s) |
+| `AWS_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | *(none)* | S3 region + credentials — **keep in a private `*.local.conf`, never commit** |
 | `APISERVER_ADVERTISE_ADDRESS` | auto | which node IP the API server advertises |
 | `STORAGE` | `longhorn` | storage backend: `longhorn`, `nfs`, or `none` |
 | `LONGHORN_VERSION` | `v1.10.0` | Longhorn version (when `STORAGE=longhorn`) |
@@ -714,6 +750,8 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `scripts/09-metrics-server.sh` | install metrics-server (HPA + `kubectl top`) |
 | `scripts/10-vpa.sh` | install the Vertical Pod Autoscaler |
 | `scripts/11-prometheus.sh` | install Prometheus (kube-prometheus-stack, no Grafana) |
+| `scripts/12-velero.sh` | install Velero and back up the cluster + PV data to AWS S3 |
+| `scripts/13-nfs-s3-sync.sh` | CronJob that syncs the raw NFS export to S3 |
 | `scripts/06-knative-istio.sh` | install Knative (Serving/Eventing) on Istio + sidecar injection |
 | `scripts/07-argocd.sh` | install Argo CD (GitOps continuous delivery) |
 | `scripts/08-openbao.sh` | install OpenBao (HA Raft secret manager) + init/unseal |

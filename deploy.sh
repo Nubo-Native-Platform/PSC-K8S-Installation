@@ -127,6 +127,14 @@ PROMETHEUS="${SET[PROMETHEUS]:-true}"
 PROMETHEUS_RETENTION="${SET[PROMETHEUS_RETENTION]:-7d}"
 PROMETHEUS_STORAGE_CLASS="${SET[PROMETHEUS_STORAGE_CLASS]:-}"
 
+# ---- Backups to S3 (need S3 creds; keep those in a private *.local.conf) ----
+VELERO="${SET[VELERO]:-false}"                 # Velero -> S3 (cluster + PV data)
+NFS_S3_SYNC="${SET[NFS_S3_SYNC]:-false}"       # raw NFS export -> S3 CronJob
+VELERO_BUCKET="${SET[VELERO_BUCKET]:-}"
+NFS_S3_BUCKET="${SET[NFS_S3_BUCKET]:-}"; NFS_S3_PREFIX="${SET[NFS_S3_PREFIX]:-nfs-backup}"
+AWS_REGION="${SET[AWS_REGION]:-}"
+AWS_ACCESS_KEY_ID="${SET[AWS_ACCESS_KEY_ID]:-}"; AWS_SECRET_ACCESS_KEY="${SET[AWS_SECRET_ACCESS_KEY]:-}"
+
 # ---- Knative + Istio (optional) --------------------------------------------
 KNATIVE="${SET[KNATIVE]:-true}"                  # installed by default; set false to skip
 KNATIVE_EVENTING="${SET[KNATIVE_EVENTING]:-true}"
@@ -308,6 +316,8 @@ cmd_install(){
   [[ "$KNATIVE" == true ]] && cmd_knative
   [[ "$ARGOCD" == true ]] && cmd_argocd
   [[ "$OPENBAO" == true ]] && cmd_openbao
+  [[ "$VELERO" == true ]] && cmd_velero
+  [[ "$NFS_S3_SYNC" == true ]] && cmd_nfs_s3
 
   if [[ "$FETCH_KUBECONFIG" == true ]]; then
     fetch_kubeconfig
@@ -360,6 +370,26 @@ cmd_vpa(){
   local M0="${M_IP[0]}"; step "installing VPA (via $M0)"
   push_as "$SSH_USER" "$M0" "$HERE/scripts/10-vpa.sh"
   rsh "$M0" "sudo VPA_VERSION='$VPA_VERSION' bash /tmp/10-vpa.sh"
+}
+
+# Install Velero (backup to S3), via the first master.
+cmd_velero(){
+  [[ -f "$HERE/scripts/12-velero.sh" ]] || die "scripts/12-velero.sh not found"
+  [[ -n "$VELERO_BUCKET" && -n "$AWS_REGION" && -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] \
+    || die "Velero needs VELERO_BUCKET, AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (put them in a private *.local.conf)"
+  local M0="${M_IP[0]}"; step "installing Velero (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/12-velero.sh"
+  rsh "$M0" "sudo VELERO_BUCKET='$VELERO_BUCKET' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' bash /tmp/12-velero.sh"
+}
+
+# Install the raw NFS-export -> S3 sync CronJob, via the first master.
+cmd_nfs_s3(){
+  [[ -f "$HERE/scripts/13-nfs-s3-sync.sh" ]] || die "scripts/13-nfs-s3-sync.sh not found"
+  [[ -n "$NFS_S3_BUCKET" && -n "$AWS_REGION" && -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" && -n "$NFS_SERVER" ]] \
+    || die "NFS->S3 needs NFS_S3_BUCKET, AWS_REGION, AWS creds, and NFS_SERVER"
+  local M0="${M_IP[0]}"; step "installing NFS->S3 sync (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/13-nfs-s3-sync.sh"
+  rsh "$M0" "sudo NFS_S3_BUCKET='$NFS_S3_BUCKET' NFS_S3_PREFIX='$NFS_S3_PREFIX' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' bash /tmp/13-nfs-s3-sync.sh"
 }
 
 # Install Knative (Serving + optional Eventing) on Istio, via the first master.
@@ -472,8 +502,10 @@ case "$ACTION" in
   knative)    cmd_knative ;;
   argocd)     cmd_argocd ;;
   openbao)    cmd_openbao ;;
+  velero)     cmd_velero ;;
+  nfs-s3-sync) cmd_nfs_s3 ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | kubeconfig | upgrade <ver> | reset)";;
 esac
