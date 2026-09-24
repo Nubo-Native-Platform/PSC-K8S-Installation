@@ -231,6 +231,8 @@ credentials and is git-ignored — keep it safe.)
 ./deploy.sh add-worker w6 IP    # join ONE new worker to the existing cluster
 ./deploy.sh remove-worker NODE  # drain + remove a worker from the cluster
 ./deploy.sh storage             # (re)install storage only
+./deploy.sh metrics             # install metrics-server (HPA + kubectl top)
+./deploy.sh vpa                 # install the Vertical Pod Autoscaler
 ./deploy.sh knative             # install Knative (Serving/Eventing) on Istio
 ./deploy.sh argocd              # install Argo CD (GitOps)
 ./deploy.sh openbao             # install OpenBao (HA Raft secret manager)
@@ -439,6 +441,13 @@ sudo NFS_CIDR=192.168.18.0/24 ./scripts/nfs-server-setup.sh
 # and opens the firewall.
 ```
 
+> **Accidental-deletion protection.** By default `NFS_ARCHIVE_ON_DELETE=true`, so
+> deleting a PVC does **not** wipe its data — the provisioner renames the folder
+> to `archived-<ns>-<pvc>-<pv>` on the NFS server, and you can restore it. Set it
+> to `false` only if you want a PVC delete to hard-remove data. (This does not
+> protect against deleting the whole NFS export — keep backups of the server, and
+> use RBAC to limit who can delete PVCs.)
+
 **2) Point the cluster at it.** Orchestrated — in your inventory:
 ```ini
 STORAGE=nfs
@@ -633,6 +642,9 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `MAX_PODS` | `110` | kubelet max pods per node (keep ≤250 with a `/24` podCIDR) |
 | `INOTIFY_MAX_USER_INSTANCES` | `8192` | inotify instances/node (kernel default 128 is too low) |
 | `INOTIFY_MAX_USER_WATCHES` | `1048576` | inotify watches/node |
+| `METRICS_SERVER` | `true` | install metrics-server (needed for HPA + `kubectl top`) |
+| `VPA` | `true` | install the Vertical Pod Autoscaler (recommender/updater/admission) |
+| `VPA_VERSION` | `1.8.0` | pinned VPA release |
 | `KNATIVE` | `true` | `true` = install Knative + Istio during `./deploy.sh` |
 | `KNATIVE_EVENTING` | `true` | also install Knative Eventing (brokers/triggers) |
 | `ISTIO_VERSION` / `KNATIVE_VERSION` | `1.31.1` / `knative-v1.23.0` | pinned versions |
@@ -651,6 +663,7 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `NFS_SERVER` | *(empty)* | NFS server IP/host — **required when `STORAGE=nfs`** |
 | `NFS_PATH` | `/srv/nfs/k8s` | exported directory on the NFS server |
 | `NFS_SC_NAME` | `nfs-client` | StorageClass name to create (NFS) |
+| `NFS_ARCHIVE_ON_DELETE` | `true` | on PVC delete, **archive** (rename) the data instead of wiping it — protects against accidental deletion |
 | `NFS_SETUP` | `false` | `true` = `deploy.sh` sets up the NFS server on `NFS_SERVER` automatically |
 | `NFS_CIDR` | auto | network allowed to mount the NFS export (e.g. `192.168.18.0/24`) |
 | `NFS_SSH_USER` | `SSH_USER` | SSH user for the NFS host (if different) |
@@ -681,6 +694,8 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `scripts/04b-storage-nfs.sh` | modular: install NFS provisioner + StorageClass |
 | `scripts/nfs-server-setup.sh` | set up the external NFS server (run on the file server) |
 | `scripts/lb-haproxy-setup.sh` | stand up an HAProxy control-plane LB for HA |
+| `scripts/09-metrics-server.sh` | install metrics-server (HPA + `kubectl top`) |
+| `scripts/10-vpa.sh` | install the Vertical Pod Autoscaler |
 | `scripts/06-knative-istio.sh` | install Knative (Serving/Eventing) on Istio + sidecar injection |
 | `scripts/07-argocd.sh` | install Argo CD (GitOps continuous delivery) |
 | `scripts/08-openbao.sh` | install OpenBao (HA Raft secret manager) + init/unseal |

@@ -49,6 +49,10 @@ LONGHORN_SET_DEFAULT_SC="${LONGHORN_SET_DEFAULT_SC:-true}"
 NFS_SERVER="${NFS_SERVER:-}"                # NFS server IP/host (required for STORAGE=nfs)
 NFS_PATH="${NFS_PATH:-/srv/nfs/k8s}"        # exported path on the NFS server
 NFS_SC_NAME="${NFS_SC_NAME:-nfs-client}"    # StorageClass name to create
+# Safety: archive (rename to archived-*) instead of deleting data when a PVC is
+# removed, so an accidental PVC delete does NOT wipe the data. Set false to
+# hard-delete on PVC removal.
+NFS_ARCHIVE_ON_DELETE="${NFS_ARCHIVE_ON_DELETE:-true}"
 NFS_PROVISIONER_IMAGE="${NFS_PROVISIONER_IMAGE:-registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.2}"
 NFS_SET_DEFAULT_SC="${NFS_SET_DEFAULT_SC:-true}"
 NFS_NAMESPACE="${NFS_NAMESPACE:-nfs-provisioner}"
@@ -330,7 +334,7 @@ metadata:
     ${DEFAULT_ANN}
 provisioner: k8s-sigs.io/nfs-subdir-external-provisioner
 parameters:
-  archiveOnDelete: "false"
+  archiveOnDelete: "${NFS_ARCHIVE_ON_DELETE}"
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
 allowVolumeExpansion: true

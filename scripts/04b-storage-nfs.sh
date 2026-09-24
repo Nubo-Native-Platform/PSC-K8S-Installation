@@ -19,6 +19,7 @@ NFS_SERVER="${NFS_SERVER:-}"
 NFS_PATH="${NFS_PATH:-/srv/nfs/k8s}"
 NFS_SC_NAME="${NFS_SC_NAME:-nfs-client}"
 NFS_SET_DEFAULT_SC="${NFS_SET_DEFAULT_SC:-true}"
+NFS_ARCHIVE_ON_DELETE="${NFS_ARCHIVE_ON_DELETE:-true}"   # true = keep (rename) data on PVC delete
 NFS_NAMESPACE="${NFS_NAMESPACE:-nfs-provisioner}"
 NFS_PROVISIONER_IMAGE="${NFS_PROVISIONER_IMAGE:-registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.2}"
 
@@ -116,7 +117,7 @@ metadata:
     ${DEFAULT_ANN}
 provisioner: k8s-sigs.io/nfs-subdir-external-provisioner
 parameters:
-  archiveOnDelete: "false"
+  archiveOnDelete: "${NFS_ARCHIVE_ON_DELETE}"
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
 allowVolumeExpansion: true

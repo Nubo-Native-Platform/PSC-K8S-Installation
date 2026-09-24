@@ -94,6 +94,7 @@ fi
 LONGHORN_VERSION="${SET[LONGHORN_VERSION]:-v1.10.0}"
 NFS_SERVER="${SET[NFS_SERVER]:-}"; NFS_PATH="${SET[NFS_PATH]:-/srv/nfs/k8s}"
 NFS_SC_NAME="${SET[NFS_SC_NAME]:-nfs-client}"
+NFS_ARCHIVE_ON_DELETE="${SET[NFS_ARCHIVE_ON_DELETE]:-true}"   # keep data on accidental PVC delete
 [[ "$STORAGE" == nfs && -z "$NFS_SERVER" ]] && die "STORAGE=nfs — set NFS_SERVER (NFS server IP) in inventory.conf"
 
 # Fetch the admin kubeconfig to this machine at the end of install? (true|false)
@@ -112,6 +113,12 @@ NFS_CIDR="${SET[NFS_CIDR]:-}"
 # from the 3rd inventory column). BOOTSTRAP=auto runs it only if any password is set.
 LB_PASSWORD="${SET[LB_PASSWORD]:-}"; NFS_PASSWORD="${SET[NFS_PASSWORD]:-}"
 BOOTSTRAP="${SET[BOOTSTRAP]:-auto}"    # auto | true | false
+
+# ---- Autoscaling prerequisites ---------------------------------------------
+METRICS_SERVER="${SET[METRICS_SERVER]:-true}"    # HPA + kubectl top (default on)
+METRICS_SERVER_VERSION="${SET[METRICS_SERVER_VERSION]:-latest}"
+VPA="${SET[VPA]:-true}"                           # Vertical Pod Autoscaler (default on)
+VPA_VERSION="${SET[VPA_VERSION]:-1.8.0}"
 
 # ---- Knative + Istio (optional) --------------------------------------------
 KNATIVE="${SET[KNATIVE]:-true}"                  # installed by default; set false to skip
@@ -217,7 +224,7 @@ envstr(){
 
 # env prefix for the storage step (Longhorn or NFS provisioner)
 storage_envstr(){
-  echo "STORAGE='$STORAGE' LONGHORN_VERSION='$LONGHORN_VERSION' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' NFS_SC_NAME='$NFS_SC_NAME'"
+  echo "STORAGE='$STORAGE' LONGHORN_VERSION='$LONGHORN_VERSION' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' NFS_SC_NAME='$NFS_SC_NAME' NFS_ARCHIVE_ON_DELETE='$NFS_ARCHIVE_ON_DELETE'"
 }
 
 print_plan(){
@@ -288,6 +295,8 @@ cmd_install(){
   fi
 
   step "DONE"; rsh "$M0" "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide" || true
+  [[ "$METRICS_SERVER" == true ]] && cmd_metrics
+  [[ "$VPA" == true ]] && cmd_vpa
   [[ "$KNATIVE" == true ]] && cmd_knative
   [[ "$ARGOCD" == true ]] && cmd_argocd
   [[ "$OPENBAO" == true ]] && cmd_openbao
@@ -319,6 +328,22 @@ cmd_storage(){ push "${M_IP[0]}"; rsh "${M_IP[0]}" "sudo $(storage_envstr) bash 
 
 knative_envstr(){
   echo "ISTIO_VERSION='$ISTIO_VERSION' KNATIVE_VERSION='$KNATIVE_VERSION' KNATIVE_EVENTING='$KNATIVE_EVENTING' KNATIVE_INGRESS_TYPE='$KNATIVE_INGRESS_TYPE' KNATIVE_DOMAIN_IP='$KNATIVE_DOMAIN_IP'"
+}
+
+# Install metrics-server (HPA + kubectl top), via the first master.
+cmd_metrics(){
+  [[ -f "$HERE/scripts/09-metrics-server.sh" ]] || die "scripts/09-metrics-server.sh not found"
+  local M0="${M_IP[0]}"; step "installing metrics-server (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/09-metrics-server.sh"
+  rsh "$M0" "sudo METRICS_SERVER_VERSION='$METRICS_SERVER_VERSION' bash /tmp/09-metrics-server.sh"
+}
+
+# Install the Vertical Pod Autoscaler, via the first master.
+cmd_vpa(){
+  [[ -f "$HERE/scripts/10-vpa.sh" ]] || die "scripts/10-vpa.sh not found"
+  local M0="${M_IP[0]}"; step "installing VPA (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/10-vpa.sh"
+  rsh "$M0" "sudo VPA_VERSION='$VPA_VERSION' bash /tmp/10-vpa.sh"
 }
 
 # Install Knative (Serving + optional Eventing) on Istio, via the first master.
@@ -425,11 +450,13 @@ case "$ACTION" in
   add-worker)    shift; cmd_add_worker "$@" ;;
   remove-worker) shift; cmd_remove_worker "$@" ;;
   storage)    cmd_storage ;;
+  metrics)    cmd_metrics ;;
+  vpa)        cmd_vpa ;;
   knative)    cmd_knative ;;
   argocd)     cmd_argocd ;;
   openbao)    cmd_openbao ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | knative | argocd | openbao | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | knative | argocd | openbao | kubeconfig | upgrade <ver> | reset)";;
 esac
