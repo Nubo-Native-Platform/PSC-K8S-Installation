@@ -16,16 +16,16 @@ overlay
 br_netfilter
 EOF
 modprobe overlay; modprobe br_netfilter
-cat >/etc/sysctl.d/99-k8s.conf <<'EOF'
+cat >/etc/sysctl.d/99-k8s.conf <<EOF
 net.bridge.bridge-nf-call-iptables  = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward                 = 1
-# Raise inotify limits. The kernel default max_user_instances (128) is far too
-# low for busy nodes: kubelet/containerd and log watchers exhaust it, which makes
-# "kubectl logs" return nothing and leaves pods stuck not-Ready / CrashLoopBackOff
-# with "too many open files".
-fs.inotify.max_user_instances       = 8192
-fs.inotify.max_user_watches         = 524288
+# Raise inotify limits (configurable). The kernel default max_user_instances
+# (128) is far too low for busy nodes: kubelet/containerd and log watchers
+# exhaust it, which makes "kubectl logs" return nothing and leaves pods stuck
+# not-Ready / CrashLoopBackOff with "too many open files".
+fs.inotify.max_user_instances       = ${INOTIFY_MAX_USER_INSTANCES:-8192}
+fs.inotify.max_user_watches         = ${INOTIFY_MAX_USER_WATCHES:-1048576}
 EOF
 sysctl --system >/dev/null
 

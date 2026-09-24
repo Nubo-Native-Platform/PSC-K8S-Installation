@@ -78,6 +78,9 @@ case "$K8S_MINOR" in
 esac
 CNI="${SET[CNI]:-flannel}"; POD_CIDR="${SET[POD_CIDR]:-10.244.0.0/16}"
 CPE="${SET[CONTROL_PLANE_ENDPOINT]:-}"
+MAX_PODS="${SET[MAX_PODS]:-110}"       # kubelet maxPods per node (<=250 with a /24 podCIDR)
+INOTIFY_MAX_USER_INSTANCES="${SET[INOTIFY_MAX_USER_INSTANCES]:-8192}"
+INOTIFY_MAX_USER_WATCHES="${SET[INOTIFY_MAX_USER_WATCHES]:-1048576}"
 
 # ---- storage backend: longhorn | nfs | none --------------------------------
 # Back-compat: honour a legacy LONGHORN=true/false if STORAGE is not set.
@@ -187,7 +190,7 @@ want_bootstrap(){
 
 # common env prefix passed into k8s.sh on the remote node
 envstr(){
-  echo "K8S_MINOR='$K8S_MINOR' K8S_PATCH='$K8S_PATCH' CNI='$CNI' HA_MODE='$HA_MODE' POD_CIDR='$POD_CIDR' CONTROL_PLANE_ENDPOINT='$CPE'"
+  echo "K8S_MINOR='$K8S_MINOR' K8S_PATCH='$K8S_PATCH' CNI='$CNI' HA_MODE='$HA_MODE' POD_CIDR='$POD_CIDR' CONTROL_PLANE_ENDPOINT='$CPE' MAX_PODS='$MAX_PODS' INOTIFY_MAX_USER_INSTANCES='$INOTIFY_MAX_USER_INSTANCES' INOTIFY_MAX_USER_WATCHES='$INOTIFY_MAX_USER_WATCHES'"
 }
 
 # env prefix for the storage step (Longhorn or NFS provisioner)

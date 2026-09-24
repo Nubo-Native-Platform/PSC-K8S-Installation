@@ -511,6 +511,9 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `CONTROL_PLANE_ENDPOINT` | *(empty)* | VIP/LB `host:6443` — **required for HA** |
 | `POD_CIDR` | `10.244.0.0/16` | pod network range (Calico prefers `192.168.0.0/16`) |
 | `SERVICE_CIDR` | `10.96.0.0/12` | service network range |
+| `MAX_PODS` | `110` | kubelet max pods per node (keep ≤250 with a `/24` podCIDR) |
+| `INOTIFY_MAX_USER_INSTANCES` | `8192` | inotify instances/node (kernel default 128 is too low) |
+| `INOTIFY_MAX_USER_WATCHES` | `1048576` | inotify watches/node |
 | `APISERVER_ADVERTISE_ADDRESS` | auto | which node IP the API server advertises |
 | `STORAGE` | `longhorn` | storage backend: `longhorn`, `nfs`, or `none` |
 | `LONGHORN_VERSION` | `v1.10.0` | Longhorn version (when `STORAGE=longhorn`) |

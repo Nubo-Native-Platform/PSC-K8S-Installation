@@ -33,6 +33,10 @@ CNI="${CNI:-flannel}"                       # flannel | calico
 HA_MODE="${HA_MODE:-single}"                # single | multi
 POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
 SERVICE_CIDR="${SERVICE_CIDR:-10.96.0.0/12}"
+MAX_PODS="${MAX_PODS:-110}"                 # kubelet maxPods per node (default 110)
+# inotify limits (kernel default max_user_instances=128 is too low for k8s nodes)
+INOTIFY_MAX_USER_INSTANCES="${INOTIFY_MAX_USER_INSTANCES:-8192}"
+INOTIFY_MAX_USER_WATCHES="${INOTIFY_MAX_USER_WATCHES:-1048576}"
 CONTROL_PLANE_ENDPOINT="${CONTROL_PLANE_ENDPOINT:-}"
 APISERVER_ADVERTISE_ADDRESS="${APISERVER_ADVERTISE_ADDRESS:-}"
 
@@ -85,16 +89,16 @@ prep(){
   swapoff -a; sed -i.bak '/\bswap\b/ s/^/#/' /etc/fstab || true
   printf 'overlay\nbr_netfilter\n' >/etc/modules-load.d/k8s.conf
   modprobe overlay; modprobe br_netfilter
-  cat >/etc/sysctl.d/99-k8s.conf <<'EOF'
+  cat >/etc/sysctl.d/99-k8s.conf <<EOF
 net.bridge.bridge-nf-call-iptables  = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward                 = 1
-# Raise inotify limits. The kernel default max_user_instances (128) is far too
-# low for busy nodes: kubelet/containerd and log watchers exhaust it, which makes
-# "kubectl logs" return nothing and leaves pods stuck not-Ready / CrashLoopBackOff
-# with "too many open files".
-fs.inotify.max_user_instances       = 8192
-fs.inotify.max_user_watches         = 524288
+# Raise inotify limits (configurable). The kernel default max_user_instances
+# (128) is far too low for busy nodes: kubelet/containerd and log watchers
+# exhaust it, which makes "kubectl logs" return nothing and leaves pods stuck
+# not-Ready / CrashLoopBackOff with "too many open files".
+fs.inotify.max_user_instances       = ${INOTIFY_MAX_USER_INSTANCES}
+fs.inotify.max_user_watches         = ${INOTIFY_MAX_USER_WATCHES}
 EOF
   sysctl --system >/dev/null
 
@@ -145,6 +149,17 @@ EOF
   systemctl enable --now iscsid >/dev/null 2>&1 || true
 }
 
+# Set kubelet maxPods (run AFTER kubeadm init/join has written config.yaml).
+# Note: with a /24 per-node podCIDR there are 254 pod IPs, so keep MAX_PODS<=250.
+apply_max_pods(){
+  [[ -n "$MAX_PODS" && "$MAX_PODS" != 110 ]] || return 0
+  local f=/var/lib/kubelet/config.yaml
+  [[ -f "$f" ]] || { warn "kubelet config not found; skipping maxPods"; return 0; }
+  if grep -q '^maxPods:' "$f"; then sed -i "s/^maxPods:.*/maxPods: ${MAX_PODS}/" "$f"; else echo "maxPods: ${MAX_PODS}" >>"$f"; fi
+  systemctl restart kubelet
+  log "kubelet maxPods set to ${MAX_PODS}"
+}
+
 # ---------- init first control plane -----------------------------------------
 cmd_init(){
   need_root; prep
@@ -159,6 +174,7 @@ cmd_init(){
   fi
   log "kubeadm init on $IP (HA_MODE=$HA_MODE)"
   kubeadm init "${args[@]}"
+  apply_max_pods
 
   export KUBECONFIG=/etc/kubernetes/admin.conf
   mkdir -p /root/.kube && cp -f /etc/kubernetes/admin.conf /root/.kube/config
@@ -192,6 +208,7 @@ cmd_join(){
   need_root; prep
   [[ -n "$JOIN" ]] || die "no JOIN command. On a master run:  k8s.sh token   then pass JOIN=\"kubeadm join ...\""
   log "joining cluster"; eval "$JOIN"
+  apply_max_pods
   log "joined. From a master:  kubectl get nodes -o wide"
 }
 

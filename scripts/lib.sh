@@ -36,6 +36,18 @@ node_ip() {
 
 detect_pm() { command -v apt-get >/dev/null && echo apt || { command -v dnf >/dev/null && echo dnf || die "unsupported distro (need apt or dnf)"; }; }
 
+# Set kubelet maxPods (run AFTER kubeadm init/join wrote config.yaml).
+# Keep <=250 with a /24 per-node podCIDR (254 pod IPs).
+apply_max_pods() {
+  local mp="${MAX_PODS:-110}"
+  [[ -n "$mp" && "$mp" != 110 ]] || return 0
+  local f=/var/lib/kubelet/config.yaml
+  [[ -f "$f" ]] || { warn "kubelet config not found; skipping maxPods"; return 0; }
+  if grep -q '^maxPods:' "$f"; then sed -i "s/^maxPods:.*/maxPods: ${mp}/" "$f"; else echo "maxPods: ${mp}" >>"$f"; fi
+  systemctl restart kubelet
+  log "kubelet maxPods set to ${mp}"
+}
+
 # apt-get update can hit transient mirror-sync errors ("File has unexpected
 # size"); retry a few times before giving up.
 apt_update() { local i; for i in 1 2 3 4 5; do apt-get update -qq && return 0; warn "apt-get update failed (attempt $i/5) — retrying in 5s"; sleep 5; done; die "apt-get update failed after 5 attempts"; }
