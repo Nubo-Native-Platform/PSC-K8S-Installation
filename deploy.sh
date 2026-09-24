@@ -7,6 +7,7 @@
 #    ./deploy.sh -i my.conf      # use a different inventory
 #    ./deploy.sh check           # test SSH + sudo to every node
 #    ./deploy.sh storage         # (re)install storage (Longhorn or NFS) only
+#    ./deploy.sh kubeconfig      # fetch admin kubeconfig to ./kubeconfig
 #    ./deploy.sh upgrade 1.37.0  # rolling upgrade of the whole cluster
 #    ./deploy.sh reset           # kubeadm reset every node (DESTROYS cluster)
 #
@@ -171,7 +172,23 @@ cmd_install(){
   fi
 
   step "DONE"; rsh "$M0" "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide" || true
-  log "kubeconfig on primary master: /etc/kubernetes/admin.conf  (scp it to your laptop for kubectl)"
+  fetch_kubeconfig
+}
+
+# Pull admin.conf from the primary master to THIS machine so kubectl works
+# locally right away. The server field already points at the right address
+# (the control-plane endpoint for HA, or the master's IP for single-master).
+fetch_kubeconfig(){
+  local M0="${M_IP[0]}" out="$HERE/kubeconfig"
+  step "fetching kubeconfig -> $out"
+  if rsh "$M0" "sudo cat /etc/kubernetes/admin.conf" >"$out.tmp" 2>/dev/null && [[ -s "$out.tmp" ]]; then
+    mv -f "$out.tmp" "$out"; chmod 600 "$out"
+    log "kubeconfig saved: $out"
+    log "use it with:   export KUBECONFIG=\"$out\"   &&   kubectl get nodes"
+    command -v kubectl >/dev/null && { log "quick check:"; KUBECONFIG="$out" kubectl get nodes 2>/dev/null || warn "kubectl couldn't reach the API from here (check routing/firewall to the endpoint)"; }
+  else
+    rm -f "$out.tmp"; warn "could not fetch kubeconfig automatically; on the master it is at /etc/kubernetes/admin.conf"
+  fi
 }
 
 cmd_storage(){ push "${M_IP[0]}"; rsh "${M_IP[0]}" "sudo $(storage_envstr) bash /tmp/k8s.sh storage"; }
@@ -205,10 +222,11 @@ cmd_reset(){
 }
 
 case "$ACTION" in
-  check)   cmd_check ;;
-  install) cmd_install ;;
-  storage) cmd_storage ;;
-  upgrade) shift; cmd_upgrade "$@" ;;
-  reset)   cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | install | storage | upgrade <ver> | reset)";;
+  check)      cmd_check ;;
+  install)    cmd_install ;;
+  storage)    cmd_storage ;;
+  kubeconfig) fetch_kubeconfig ;;
+  upgrade)    shift; cmd_upgrade "$@" ;;
+  reset)      cmd_reset ;;
+  *) die "unknown action: $ACTION (use: check | install | storage | kubeconfig | upgrade <ver> | reset)";;
 esac
