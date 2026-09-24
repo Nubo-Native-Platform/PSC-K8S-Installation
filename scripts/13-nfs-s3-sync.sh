@@ -4,6 +4,11 @@
 # copy of the whole /srv/nfs/k8s, independent of Kubernetes/Velero.
 # Run once from a master.
 #
+# NOTE: best-effort at the file level — it cannot read another app's PRIVATE
+# files (mode 0600 owned by a different UID, e.g. OpenBao's raft data); those are
+# skipped (the job still succeeds). For app-consistent backups of such data use
+# Velero, or the app's native snapshot (OpenBao: `bao operator raft snapshot save`).
+#
 #   sudo NFS_S3_BUCKET=my-bucket AWS_REGION=us-east-1 \
 #        AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
 #        NFS_SERVER=192.168.18.69 NFS_PATH=/srv/nfs/k8s \
@@ -67,7 +72,16 @@ spec:
                   valueFrom: { secretKeyRef: { name: nfs-s3-aws-creds, key: AWS_SECRET_ACCESS_KEY } }
               command: ["/bin/sh","-c"]
               args:
-                - aws s3 sync /export "s3://${NFS_S3_BUCKET}/${NFS_S3_PREFIX}/" --no-progress && echo "nfs->s3 sync done"
+                # aws s3 sync exits 2 when it merely SKIPS unreadable files (e.g.
+                # another app's private 0600 data like OpenBao's raft files); that
+                # is not a failure for a best-effort file-level backup. Only a real
+                # error (exit 1) should fail the job.
+                - |
+                  aws s3 sync /export "s3://${NFS_S3_BUCKET}/${NFS_S3_PREFIX}/" --no-progress; rc=\$?
+                  if [ "\$rc" = "0" ] || [ "\$rc" = "2" ]; then
+                    echo "nfs->s3 sync done (rc=\$rc; rc=2 = some unreadable files skipped)"; exit 0
+                  fi
+                  echo "nfs->s3 sync FAILED (rc=\$rc)"; exit "\$rc"
               volumeMounts: [{ name: export, mountPath: /export, readOnly: true }]
           volumes:
             - name: export

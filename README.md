@@ -634,6 +634,10 @@ Kubernetes:
 ./deploy.sh nfs-s3-sync # with NFS_S3_SYNC=true + NFS_S3_BUCKET/AWS_* set
 ```
 Creates a CronJob that `aws s3 sync`s `/srv/nfs/k8s` to `s3://<bucket>/<prefix>/`.
+It's best-effort at the file level and **skips files it can't read** (another
+app's private 0600 data, e.g. OpenBao's raft files) — the job still succeeds. For
+those, rely on Velero or the app's own snapshot (OpenBao: `bao operator raft
+snapshot save`).
 
 > Inventory keys: `VELERO`, `VELERO_BUCKET`, `NFS_S3_SYNC`, `NFS_S3_BUCKET`,
 > `NFS_S3_PREFIX`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
