@@ -3,9 +3,10 @@
 #  deploy.sh — orchestrate a whole cluster from ONE machine (Ansible-style).
 #  Reads inventory.conf, SSHes to every node, and runs k8s.sh on each.
 #
-#    ./deploy.sh                 # ONE-SHOT: provision LB/NFS (if set) + build all
+#    ./deploy.sh                 # ONE-SHOT: bootstrap + provision LB/NFS + build all
 #    ./deploy.sh -i my.conf      # use a different inventory
 #    ./deploy.sh check           # test SSH + sudo to every node
+#    ./deploy.sh bootstrap       # only install SSH keys + passwordless sudo
 #    ./deploy.sh provision       # only set up the LB and/or NFS server
 #    ./deploy.sh storage         # (re)install storage (Longhorn or NFS) only
 #    ./deploy.sh kubeconfig      # fetch admin kubeconfig to ./kubeconfig
@@ -33,7 +34,10 @@ die(){ echo -e "${r}[x]${n} $*" >&2; exit 1; }
 [[ -f "$HERE/k8s.sh" ]] || die "k8s.sh not found next to deploy.sh"
 
 # ---- parse inventory.conf ----
-declare -A SET; MASTERS=(); WORKERS=(); M_IP=(); W_IP=(); section=""
+# Node lines are:  <name>  <ip>  [password]
+# The optional 3rd column is used ONLY for the one-time SSH bootstrap (install
+# key + passwordless sudo). Keep passwords in a private, git-ignored inventory.
+declare -A SET; MASTERS=(); WORKERS=(); M_IP=(); W_IP=(); M_PW=(); W_PW=(); section=""
 while IFS= read -r line || [[ -n "$line" ]]; do
   line="${line%%#*}"; line="$(echo "$line" | sed 's/[[:space:]]*$//;s/^[[:space:]]*//')"
   [[ -z "$line" ]] && continue
@@ -45,11 +49,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   if [[ "$section" == settings ]]; then
     k="${line%%=*}"; v="${line#*=}"; SET[$k]="$v"
   elif [[ "$section" == masters ]]; then
-    name="$(awk '{print $1}' <<<"$line")"; ip="$(awk '{print $2}' <<<"$line")"
-    MASTERS+=("$name"); M_IP+=("$ip")
+    name="$(awk '{print $1}' <<<"$line")"; ip="$(awk '{print $2}' <<<"$line")"; pw="$(awk '{print $3}' <<<"$line")"
+    MASTERS+=("$name"); M_IP+=("$ip"); M_PW+=("$pw")
   elif [[ "$section" == workers ]]; then
-    name="$(awk '{print $1}' <<<"$line")"; ip="$(awk '{print $2}' <<<"$line")"
-    WORKERS+=("$name"); W_IP+=("$ip")
+    name="$(awk '{print $1}' <<<"$line")"; ip="$(awk '{print $2}' <<<"$line")"; pw="$(awk '{print $3}' <<<"$line")"
+    WORKERS+=("$name"); W_IP+=("$ip"); W_PW+=("$pw")
   fi
 done < "$INV"
 
@@ -96,6 +100,10 @@ FETCH_KUBECONFIG="${SET[FETCH_KUBECONFIG]:-true}"
 LB_HOST="${SET[LB_HOST]:-}";        LB_SSH_USER="${SET[LB_SSH_USER]:-$SSH_USER}"
 NFS_SETUP="${SET[NFS_SETUP]:-false}"; NFS_SSH_USER="${SET[NFS_SSH_USER]:-$SSH_USER}"
 NFS_CIDR="${SET[NFS_CIDR]:-}"
+# Optional passwords for the infra hosts' one-time bootstrap (node passwords come
+# from the 3rd inventory column). BOOTSTRAP=auto runs it only if any password is set.
+LB_PASSWORD="${SET[LB_PASSWORD]:-}"; NFS_PASSWORD="${SET[NFS_PASSWORD]:-}"
+BOOTSTRAP="${SET[BOOTSTRAP]:-auto}"    # auto | true | false
 
 # HA auto-detect
 if [[ ${#MASTERS[@]} -gt 1 ]]; then
@@ -131,6 +139,48 @@ provision_infra(){
     push_as "$LB_SSH_USER" "$LB_HOST" "$HERE/scripts/lb-haproxy-setup.sh"
     rsh_as "$LB_SSH_USER" "$LB_HOST" "sudo bash /tmp/lb-haproxy-setup.sh ${M_IP[*]}"
   fi
+}
+
+# ---- one-time SSH bootstrap (install key + passwordless sudo) ----------------
+# Uses passwords (node 3rd column, or LB_PASSWORD/NFS_PASSWORD) via sshpass, or
+# plink (PuTTY) as a fallback on Windows. After this, everything is key-based.
+PUBKEY_FILE="${SSH_KEY:-$HOME/.ssh/id_rsa}.pub"
+_PLINK=""; command -v plink >/dev/null 2>&1 && _PLINK="plink"; [[ -z "$_PLINK" && -x "/c/Program Files/PuTTY/plink.exe" ]] && _PLINK="/c/Program Files/PuTTY/plink.exe"
+
+# bootstrap_host <user> <ip> <password>
+bootstrap_host(){
+  local u="$1" ip="$2" pw="$3"
+  [[ -n "$pw" ]] || { warn "no password for $u@$ip — skipping (assuming key already works)"; return 0; }
+  [[ -f "$PUBKEY_FILE" ]] || die "public key not found: $PUBKEY_FILE (generate one: ssh-keygen -t rsa -b 4096)"
+  local pub; pub="$(cat "$PUBKEY_FILE")"
+  local remote="mkdir -p ~/.ssh && chmod 700 ~/.ssh && (grep -qF '$pub' ~/.ssh/authorized_keys 2>/dev/null || echo '$pub' >> ~/.ssh/authorized_keys) && chmod 600 ~/.ssh/authorized_keys && echo '$pw' | sudo -S bash -c 'echo \"$u ALL=(ALL) NOPASSWD:ALL\" >/etc/sudoers.d/90-$u-nopasswd && chmod 440 /etc/sudoers.d/90-$u-nopasswd' && echo BOOTSTRAP_OK"
+  if command -v sshpass >/dev/null 2>&1; then
+    sshpass -p "$pw" ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p "$SSH_PORT" "$u@$ip" "$remote" >/dev/null \
+      && log "bootstrapped $u@$ip" || die "bootstrap failed for $u@$ip (check password/connectivity)"
+  elif [[ -n "$_PLINK" ]]; then
+    echo y | "$_PLINK" -ssh -pw "$pw" "$u@$ip" "exit" >/dev/null 2>&1 || true   # cache host key
+    "$_PLINK" -ssh -batch -pw "$pw" "$u@$ip" "$remote" >/dev/null \
+      && log "bootstrapped $u@$ip" || die "bootstrap failed for $u@$ip (check password/connectivity)"
+  else
+    die "need 'sshpass' (Linux/mac/WSL) or PuTTY 'plink' (Windows) to bootstrap with passwords; or run ssh-copy-id manually and remove the password column"
+  fi
+}
+
+bootstrap_all(){
+  step "0/4  bootstrapping SSH keys + passwordless sudo"
+  local i
+  for i in "${!MASTERS[@]}"; do bootstrap_host "$SSH_USER" "${M_IP[$i]}" "${M_PW[$i]}"; done
+  for i in "${!WORKERS[@]}"; do bootstrap_host "$SSH_USER" "${W_IP[$i]}" "${W_PW[$i]}"; done
+  [[ "$STORAGE" == nfs && "$NFS_SETUP" == true && -n "$NFS_PASSWORD" ]] && bootstrap_host "$NFS_SSH_USER" "$NFS_SERVER" "$NFS_PASSWORD"
+  [[ "$HA_MODE" == multi && -n "$LB_HOST" && -n "$LB_PASSWORD" ]] && bootstrap_host "$LB_SSH_USER" "$LB_HOST" "$LB_PASSWORD"
+}
+
+# Should the auto-bootstrap run? true, or auto + at least one password present.
+want_bootstrap(){
+  [[ "$BOOTSTRAP" == false ]] && return 1
+  [[ "$BOOTSTRAP" == true ]] && return 0
+  local p; for p in "${M_PW[@]}" "${W_PW[@]}" "$LB_PASSWORD" "$NFS_PASSWORD"; do [[ -n "$p" ]] && return 0; done
+  return 1
 }
 
 # common env prefix passed into k8s.sh on the remote node
@@ -175,6 +225,7 @@ cmd_install(){
   print_plan
   echo; read -rp "Proceed with install? [y/N] " a; [[ "$a" =~ ^[Yy]$ ]] || die "aborted"
 
+  want_bootstrap && bootstrap_all
   provision_infra
 
   local M0="${M_IP[0]}"
@@ -266,10 +317,11 @@ cmd_reset(){
 case "$ACTION" in
   check)      cmd_check ;;
   install)    cmd_install ;;
+  bootstrap)  print_plan; bootstrap_all ;;
   provision)  print_plan; provision_infra ;;
   storage)    cmd_storage ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | install | provision | storage | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | storage | kubeconfig | upgrade <ver> | reset)";;
 esac

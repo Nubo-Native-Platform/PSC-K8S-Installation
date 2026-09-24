@@ -123,7 +123,30 @@ subcommands on the right nodes over SSH, in the right order.
 **For the orchestrated setup, also on your laptop:**
 - `bash`, `ssh`, `scp` (Linux, macOS, WSL, or Git Bash — **not** native
   PowerShell).
-- SSH access (key recommended) to every node with password-less `sudo`.
+- SSH access to every node with password-less `sudo`. Either set up keys
+  yourself (`ssh-copy-id`), or let `deploy.sh` bootstrap it from passwords in the
+  inventory (see [SSH bootstrap](#ssh-bootstrap-fully-automated) below) — that
+  needs `sshpass` (Linux/mac/WSL) or PuTTY `plink` (Windows).
+
+### SSH bootstrap (fully automated)
+
+To make the whole thing a single command with nothing set up by hand, put a
+password as the optional **3rd column** on each node line, and
+`LB_PASSWORD`/`NFS_PASSWORD` in `[settings]`:
+```ini
+[masters]
+master1  10.0.0.11  s3cret-pw
+[workers]
+worker1  10.0.0.21  s3cret-pw
+```
+`deploy.sh` installs your SSH public key and passwordless sudo on every host
+first (`BOOTSTRAP=auto` runs it whenever any password is present), then provisions
+and builds. Run just this phase with `./deploy.sh bootstrap`.
+
+> **Never commit passwords.** Keep them in a private inventory — `*.local.conf`
+> and `secrets.conf` are git-ignored. Copy the example, add passwords to the copy,
+> and deploy with `-i your.local.conf`. Prefer key-based auth for anything
+> long-lived; the password column is only used for this one-time bootstrap.
 
 ---
 
@@ -199,6 +222,8 @@ credentials and is git-ignored — keep it safe.)
 ### 3. Other actions
 ```bash
 ./deploy.sh -i staging.conf     # use a different inventory file
+./deploy.sh bootstrap           # install SSH keys + passwordless sudo (from passwords)
+./deploy.sh provision           # set up the LB and/or NFS server only
 ./deploy.sh storage             # (re)install storage only
 ./deploy.sh kubeconfig          # fetch admin kubeconfig to ./kubeconfig
 ./deploy.sh upgrade 1.37.0      # rolling upgrade the whole cluster
@@ -464,6 +489,8 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `NFS_SSH_USER` | `SSH_USER` | SSH user for the NFS host (if different) |
 | `LB_HOST` | *(empty)* | host to auto-provision HAProxy on for HA; endpoint becomes `LB_HOST:6443` |
 | `LB_SSH_USER` | `SSH_USER` | SSH user for the LB host (e.g. `debian` on a Debian proxy) |
+| `BOOTSTRAP` | `auto` | `auto`=bootstrap SSH keys+sudo if any password is set; `true`/`false` to force |
+| `LB_PASSWORD` / `NFS_PASSWORD` | *(empty)* | bootstrap passwords for the LB / NFS hosts (keep in a private inventory) |
 | `FETCH_KUBECONFIG` | `true` | after install, copy the admin kubeconfig to `./kubeconfig` (`false` = don't) |
 | `SSH_USER` / `SSH_KEY` / `SSH_PORT` | `ubuntu` / `~/.ssh/id_rsa` / `22` | SSH access (orchestrated only) |
 
