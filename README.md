@@ -54,7 +54,8 @@ Both use the **same engine** (`k8s.sh`), so you can mix them.
   command; or the orchestrator joins them all for you.
 - **Pre-installs everything Kubernetes needs** — container runtime
   (containerd, correctly configured), kernel modules, sysctl networking, swap
-  off, CNI network plugin (Flannel or Calico), and iSCSI/NFS clients.
+  off, raised inotify limits (so logs show and pods stay Ready under load), CNI
+  network plugin (Flannel or Calico), and iSCSI/NFS clients.
 - **Storage class out of the box** — choose **Longhorn** (distributed
   replicated block storage on the nodes) or **NFS** (dynamic PVCs from an
   external NFS server) and it's set as the default `StorageClass`.
@@ -562,6 +563,7 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | Worker join fails “token expired” | run `sudo bash k8s.sh token` on a master for a fresh command |
 | `swap` / preflight errors | prep disables swap; re-run `k8s.sh` prep, or check `/etc/fstab` |
 | Longhorn PVC stuck `Pending` | ensure `open-iscsi`/`iscsid` is running on every node (prep installs it) |
+| `kubectl logs` empty / pods stuck not-Ready with "too many open files" | inotify exhaustion — prep raises `fs.inotify.max_user_instances` to 8192 (kernel default 128 is too low). On an already-running node: `sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=524288` |
 | `kubectl` from laptop | `scp master:/etc/kubernetes/admin.conf ~/.kube/config` then edit the server IP |
 
 Useful checks:

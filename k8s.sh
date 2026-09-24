@@ -89,6 +89,12 @@ prep(){
 net.bridge.bridge-nf-call-iptables  = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward                 = 1
+# Raise inotify limits. The kernel default max_user_instances (128) is far too
+# low for busy nodes: kubelet/containerd and log watchers exhaust it, which makes
+# "kubectl logs" return nothing and leaves pods stuck not-Ready / CrashLoopBackOff
+# with "too many open files".
+fs.inotify.max_user_instances       = 8192
+fs.inotify.max_user_watches         = 524288
 EOF
   sysctl --system >/dev/null
 
