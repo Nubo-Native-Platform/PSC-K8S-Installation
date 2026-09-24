@@ -657,7 +657,20 @@ public access blocked.
 
 **Full restore procedures: [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)** —
 Velero (full / per-namespace / selective), raw NFS→S3 file recovery, and OpenBao
-raft snapshot restore.
+raft snapshot restore. Easy restore from your machine:
+```bash
+./deploy.sh backups                      # list backups available in S3
+./deploy.sh restore <backup-name> [ns]   # restore everything, or one namespace
+```
+
+**Total cluster loss? [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md)** —
+rebuild a fresh cluster and restore everything from S3 (Velero + restic +
+OpenBao snapshot), including the off-cluster keys you must keep.
+
+> Velero uses its **own bucket prefix** (`VELERO_PREFIX=velero`) so it can share
+> the bucket with the restic NFS repo (`nfs-restic/`). Velero rejects a location
+> whose root holds foreign data ("invalid top-level directory"), so never point
+> Velero at the bucket root when other tools use the same bucket.
 
 ---
 

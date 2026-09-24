@@ -132,10 +132,11 @@ BACKUP_ALERTS="${SET[BACKUP_ALERTS]:-true}"      # Prometheus alerts if backups 
 VELERO="${SET[VELERO]:-false}"                 # Velero -> S3 (cluster + PV data)
 NFS_S3_SYNC="${SET[NFS_S3_SYNC]:-false}"       # raw NFS export -> S3 CronJob
 VELERO_BUCKET="${SET[VELERO_BUCKET]:-}"
+VELERO_PREFIX="${SET[VELERO_PREFIX]:-velero}"                   # Velero's own bucket prefix (must not share root with restic)
 VELERO_KEEP="${SET[VELERO_KEEP]:-15}"                           # always keep newest 15 (count)
 VELERO_TTL="${SET[VELERO_TTL]:-720h0m0s}"                       # 30d backstop only
 VELERO_EXCLUDE_NAMESPACES="${SET[VELERO_EXCLUDE_NAMESPACES]:-monitoring}"
-NFS_S3_BUCKET="${SET[NFS_S3_BUCKET]:-}"; NFS_S3_PREFIX="${SET[NFS_S3_PREFIX]:-nfs-backup}"
+NFS_S3_BUCKET="${SET[NFS_S3_BUCKET]:-}"; NFS_S3_PREFIX="${SET[NFS_S3_PREFIX]:-nfs-restic}"
 NFS_S3_STORAGE_CLASS="${SET[NFS_S3_STORAGE_CLASS]:-STANDARD}"
 NFS_S3_KEEP="${SET[NFS_S3_KEEP]:-4}"                            # always keep newest 4 daily snapshots
 AWS_REGION="${SET[AWS_REGION]:-}"
@@ -386,7 +387,7 @@ cmd_velero(){
     || die "Velero needs VELERO_BUCKET, AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (put them in a private *.local.conf)"
   local M0="${M_IP[0]}"; step "installing Velero (via $M0)"
   push_as "$SSH_USER" "$M0" "$HERE/scripts/12-velero.sh"
-  rsh "$M0" "sudo VELERO_BUCKET='$VELERO_BUCKET' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' VELERO_KEEP='$VELERO_KEEP' VELERO_TTL='$VELERO_TTL' VELERO_EXCLUDE_NAMESPACES='$VELERO_EXCLUDE_NAMESPACES' bash /tmp/12-velero.sh"
+  rsh "$M0" "sudo VELERO_BUCKET='$VELERO_BUCKET' VELERO_PREFIX='$VELERO_PREFIX' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' VELERO_KEEP='$VELERO_KEEP' VELERO_TTL='$VELERO_TTL' VELERO_EXCLUDE_NAMESPACES='$VELERO_EXCLUDE_NAMESPACES' bash /tmp/12-velero.sh"
 }
 
 # Install the raw NFS-export -> S3 sync CronJob, via the first master.
@@ -397,6 +398,19 @@ cmd_nfs_s3(){
   local M0="${M_IP[0]}"; step "installing NFS->S3 sync (via $M0)"
   push_as "$SSH_USER" "$M0" "$HERE/scripts/13-nfs-s3-sync.sh"
   rsh "$M0" "sudo NFS_S3_BUCKET='$NFS_S3_BUCKET' NFS_S3_PREFIX='$NFS_S3_PREFIX' NFS_S3_STORAGE_CLASS='$NFS_S3_STORAGE_CLASS' NFS_S3_KEEP='$NFS_S3_KEEP' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' bash /tmp/13-nfs-s3-sync.sh"
+}
+
+# List Velero backups available for restore (from S3).
+cmd_backups(){ rsh "${M_IP[0]}" "sudo KUBECONFIG=/etc/kubernetes/admin.conf velero backup get"; }
+
+# Easy restore:  ./deploy.sh restore <backup-name> [namespace]
+cmd_restore(){
+  local b="${1:?usage: deploy.sh restore <backup-name> [namespace]}"; local ns="${2:-}"
+  local inc=""; [[ -n "$ns" ]] && inc="--include-namespaces $ns"
+  local rn="restore-${b}-$(date +%s)"
+  step "restoring from backup '$b'${ns:+ (namespace $ns)}"
+  rsh "${M_IP[0]}" "sudo KUBECONFIG=/etc/kubernetes/admin.conf velero restore create $rn --from-backup $b $inc --wait"
+  rsh "${M_IP[0]}" "sudo KUBECONFIG=/etc/kubernetes/admin.conf velero restore describe $rn" || true
 }
 
 # Install backup alerting (Prometheus rules + Velero ServiceMonitor).
@@ -520,8 +534,10 @@ case "$ACTION" in
   velero)     cmd_velero ;;
   nfs-s3-sync) cmd_nfs_s3 ;;
   backup-alerts) cmd_backup_alerts ;;
+  backups)    cmd_backups ;;
+  restore)    shift; cmd_restore "$@" ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
 esac

@@ -25,10 +25,13 @@ backups away — you always have the last N until newer ones replace them.
   15** daily backups (`VELERO_KEEP=15`); the schedule TTL (`VELERO_TTL=720h`, 30d)
   is only a backstop so truly abandoned backups clear after 30 days. The
   `monitoring` namespace is excluded (large/reproducible Prometheus TSDB).
-- **NFS→S3**: each run writes a **dated snapshot** `nfs-backup/<YYYY-MM-DD>/`, and
-  the job **always keeps the newest 4** (`NFS_S3_KEEP=4`), pruning older ones. An
-  S3 lifecycle rule expires `nfs-backup/` after **30 days** as a backstop only.
-  The sync skips the transient `archived-*` copies.
+- **NFS→S3**: a **restic** repository (`nfs-restic/`) with **deduplication +
+  incremental** upload — keeping the newest 4 snapshots (`NFS_S3_KEEP=4`, via
+  `restic forget --keep-last 4 --prune`) costs roughly one copy plus deltas, not
+  4× full copies. Backups are encrypted (repo password in the
+  `nfs-s3-restic-creds` Secret — **save it**, restore is impossible without it).
+  No S3 lifecycle on the repo (age-expiry would corrupt it); restic's count-based
+  forget is the only retention. The `archived-*` dirs are excluded.
 
 So at any moment you have the last **15 Velero** and last **4 NFS** backups — and
 if backups stop entirely, the last good ones survive up to **30 days** (then the
@@ -122,7 +125,20 @@ velero restore create --from-backup <backup-name> \
 ```
 
 PersistentVolume data is rehydrated automatically from S3 by the node-agent
-(File System Backup) via an init container on each restored pod — no extra step.
+(File System Backup) via a `restore-wait` init container on each restored pod.
+
+> **Known gotcha (`runAsNonRoot` pods).** Velero's `restore-wait` helper image runs
+> as a non-numeric user, so on pods that set `runAsNonRoot: true` (e.g. Argo CD)
+> the init container can fail: *"image has non-numeric user (cnb), cannot verify
+> user is non-root."* We ship a `fs-restore-action-config` ConfigMap that sets a
+> numeric user; if a pod is still stuck in `Init:CreateContainerConfigError` after
+> restore, and its blocked volume is only scratch `emptyDir` (no real data), just
+> delete the stuck pods — their Deployment/StatefulSet recreates clean pods and the
+> app comes up with its restored config/data:
+> ```bash
+> kubectl -n <ns> delete pods --all
+> ```
+> Verified: Argo CD recovered fully this way (Secrets + Application CRs intact).
 
 **Verify a restore**
 ```bash
@@ -132,29 +148,36 @@ kubectl exec -n <namespace> <pod> -- ls /your/mount   # confirm data is back
 
 ---
 
-## Restore from the raw NFS→S3 copy
+## Restore from the raw NFS→S3 copy (restic)
 
-Use this to recover an individual file/volume directory (not a full cluster).
+Use this to recover individual files/volume directories from the restic repo.
+Run a `restic/restic` pod with the repo env from the `nfs-s3-restic-creds` Secret.
 
-**1. List what's in S3**
+**1. List snapshots**
 ```bash
-aws s3 ls s3://<BUCKET>/nfs-backup/ --recursive
+kubectl -n nfs-provisioner run restic-view -it --rm --restart=Never \
+  --image=restic/restic:0.17.3 \
+  --env=RESTIC_REPOSITORY=s3:s3.<region>.amazonaws.com/<BUCKET>/nfs-restic \
+  --env=AWS_ACCESS_KEY_ID=... --env=AWS_SECRET_ACCESS_KEY=... --env=RESTIC_PASSWORD=... \
+  --command -- restic snapshots
 ```
-Each PVC is a folder named `<namespace>-<pvcname>-<pv-id>/`.
+(In-cluster, pull the values from the Secret instead of typing them.)
 
-**2. Download a volume's files**
+**2. Restore files** — restic restores into a target dir; add `--include` to scope:
 ```bash
-aws s3 cp "s3://<BUCKET>/nfs-backup/<namespace>-<pvc>-<pv-id>/" ./restore/ --recursive
+restic restore latest --target /restore --include '*/db.txt'
+find /restore -name db.txt
+```
+Each PVC's data is under `/export/<namespace>-<pvcname>-<pv-id>/` in the snapshot.
+
+**3. Put them back** into the target PVC with a helper pod + `kubectl cp`:
+```bash
+kubectl cp ./restore/. <ns>/<pod-with-the-pvc>:/data/
 ```
 
-**3. Put them back** — copy into the target PVC. Easiest is a helper pod that
-mounts the PVC, then `kubectl cp`:
-```bash
-kubectl -n <ns> exec <pod-with-the-pvc> -- mkdir -p /data/restored
-kubectl cp ./restore/. <ns>/<pod>:/data/restored/
-```
-(Remember `nfs-backup/` objects live only 3 days — restore within that window,
-or rely on Velero for older recovery.)
+> Verified in a DR drill: restic restored the exact file contents from S3.
+> Note it can only restore what it could read at backup time (not OpenBao's
+> private files — use the OpenBao raft snapshot for those).
 
 ---
 
@@ -178,9 +201,16 @@ After restore, unseal the pods again (see the OpenBao section in the README).
 
 ---
 
-## Tested
+## Tested (disaster-recovery drill)
 
-On this cluster we verified end-to-end: a Velero backup of a namespace with a
-PVC, deletion of the whole namespace, then a restore — the pod came back and the
-volume file was **byte-identical**. The NFS→S3 job uploads readable data to the
-bucket and completes cleanly (skipping apps' private files by design).
+Verified end-to-end on this cluster: deployed a stateful "critical-app"
+(StatefulSet, 2 replicas, a PVC each) with known data, backed it up with **both**
+Velero and restic, then **destroyed the entire namespace** (pods, PVCs, PVs, data
+all gone) and restored:
+- **Velero restore** brought back the StatefulSet + both PVCs, and the data was
+  **byte-identical** on both replicas.
+- **restic restore** pulled the same files back from S3, **byte-identical**.
+
+Also confirmed: neither Velero (node-agent) nor restic can read OpenBao's private
+0600 files over the squashed NFS mount — back OpenBao up with its **raft
+snapshot** (above).

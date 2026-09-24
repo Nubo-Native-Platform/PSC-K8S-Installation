@@ -25,6 +25,10 @@ set -euo pipefail
 VELERO_VERSION="${VELERO_VERSION:-v1.16.1}"
 VELERO_PLUGIN_AWS="${VELERO_PLUGIN_AWS:-v1.12.1}"
 VELERO_BUCKET="${VELERO_BUCKET:?set VELERO_BUCKET}"
+# Velero validates that its location contains ONLY its own layout, so it must have
+# its OWN prefix — otherwise other data in the bucket (e.g. the restic nfs-restic/
+# repo) makes the BackupStorageLocation "unavailable" and blocks all restores.
+VELERO_PREFIX="${VELERO_PREFIX:-velero}"
 AWS_REGION="${AWS_REGION:?set AWS_REGION}"
 AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID}"
 AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}"
@@ -62,6 +66,7 @@ velero install \
   --provider aws \
   --plugins "velero/velero-plugin-for-aws:${VELERO_PLUGIN_AWS}" \
   --bucket "${VELERO_BUCKET}" \
+  --prefix "${VELERO_PREFIX}" \
   --backup-location-config "region=${AWS_REGION}" \
   --use-volume-snapshots=false \
   --use-node-agent \
@@ -72,6 +77,25 @@ rm -f "$CREDS"
 
 log "waiting for the node-agent (File System Backup) to roll out"
 kubectl -n velero rollout status daemonset/node-agent --timeout=300s || warn "node-agent not ready yet"
+
+# FSB restore-helper must run as a NUMERIC non-root user, otherwise its
+# 'restore-wait' init container fails on pods that set runAsNonRoot (e.g. Argo CD)
+# with "image has non-numeric user (cnb), cannot verify user is non-root".
+log "configuring FSB restore-helper securityContext (numeric non-root user)"
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fs-restore-action-config
+  namespace: velero
+  labels:
+    velero.io/plugin-config: ""
+    velero.io/pod-volume-restore: RestoreItemAction
+data:
+  secCtxRunAsUser: "1000"
+  secCtxRunAsGroup: "1000"
+  secCtxRunAsNonRoot: "true"
+EOF
 
 log "backup storage location status:"
 velero backup-location get 2>/dev/null || true
