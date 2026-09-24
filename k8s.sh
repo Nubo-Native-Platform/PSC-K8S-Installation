@@ -10,30 +10,45 @@
 #   Join a worker  (grab JOIN cmd from master's output / `k8s.sh token`):
 #     curl -sfL https://YOUR_HOST/k8s.sh | sudo bash -s -- join
 #
-#   Install Longhorn storage (run on a master):
+#   Install storage (run on a master) — Longhorn (default) or NFS:
 #     curl -sfL https://YOUR_HOST/k8s.sh | sudo bash -s -- storage
+#     curl -sfL https://YOUR_HOST/k8s.sh | sudo STORAGE=nfs \
+#       NFS_SERVER=192.168.18.69 NFS_PATH=/srv/nfs/k8s bash -s -- storage
 #
 #   Upgrade (one minor at a time, control plane first):
-#     curl -sfL https://YOUR_HOST/k8s.sh | sudo bash -s -- upgrade 1.31.2 first-master
+#     curl -sfL https://YOUR_HOST/k8s.sh | sudo bash -s -- upgrade 1.37.0 first-master
 #
 #  CONFIG = environment variables (all optional, sane defaults):
-#     K8S_MINOR=1.31 K8S_PATCH= CNI=flannel HA_MODE=single \
-#     POD_CIDR=10.244.0.0/16 CONTROL_PLANE_ENDPOINT= LONGHORN_VERSION=v1.7.2 \
+#     K8S_MINOR=latest K8S_PATCH= CNI=flannel HA_MODE=single \
+#     POD_CIDR=10.244.0.0/16 CONTROL_PLANE_ENDPOINT= \
+#     STORAGE=longhorn NFS_SERVER= NFS_PATH= LONGHORN_VERSION=v1.10.0 \
 #     curl -sfL https://YOUR_HOST/k8s.sh | sudo bash -s -- init
 # =============================================================================
 set -euo pipefail
 
 # ---------- defaults (override with env vars) --------------------------------
-K8S_MINOR="${K8S_MINOR:-1.31}"
-K8S_PATCH="${K8S_PATCH:-}"
+K8S_MINOR="${K8S_MINOR:-latest}"   # 'latest' = newest stable minor (auto-detected); or pin e.g. 1.37
+K8S_PATCH="${K8S_PATCH:-}"          # empty = latest patch on the minor; or pin e.g. 1.37.0
 CNI="${CNI:-flannel}"                       # flannel | calico
 HA_MODE="${HA_MODE:-single}"                # single | multi
 POD_CIDR="${POD_CIDR:-10.244.0.0/16}"
 SERVICE_CIDR="${SERVICE_CIDR:-10.96.0.0/12}"
 CONTROL_PLANE_ENDPOINT="${CONTROL_PLANE_ENDPOINT:-}"
 APISERVER_ADVERTISE_ADDRESS="${APISERVER_ADVERTISE_ADDRESS:-}"
-LONGHORN_VERSION="${LONGHORN_VERSION:-v1.7.2}"
+
+# ---- storage backend: longhorn | nfs | none ---------------------------------
+STORAGE="${STORAGE:-longhorn}"
+# Longhorn
+LONGHORN_VERSION="${LONGHORN_VERSION:-v1.10.0}"
 LONGHORN_SET_DEFAULT_SC="${LONGHORN_SET_DEFAULT_SC:-true}"
+# NFS (external NFS server + nfs-subdir-external-provisioner)
+NFS_SERVER="${NFS_SERVER:-}"                # NFS server IP/host (required for STORAGE=nfs)
+NFS_PATH="${NFS_PATH:-/srv/nfs/k8s}"        # exported path on the NFS server
+NFS_SC_NAME="${NFS_SC_NAME:-nfs-client}"    # StorageClass name to create
+NFS_PROVISIONER_IMAGE="${NFS_PROVISIONER_IMAGE:-registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.2}"
+NFS_SET_DEFAULT_SC="${NFS_SET_DEFAULT_SC:-true}"
+NFS_NAMESPACE="${NFS_NAMESPACE:-nfs-provisioner}"
+
 JOIN="${JOIN:-}"                            # full join command (for `join`)
 
 # ---------- helpers ----------------------------------------------------------
@@ -43,12 +58,29 @@ warn(){ echo -e "${y}[!]${n} $*"; }
 die(){ echo -e "${r}[x]${n} $*" >&2; exit 1; }
 need_root(){ [[ $EUID -eq 0 ]] || die "run as root (use sudo)"; }
 pm(){ command -v apt-get >/dev/null && echo apt || { command -v dnf >/dev/null && echo dnf || die "need apt or dnf"; }; }
+# apt-get update can hit transient mirror-sync errors ("File has unexpected
+# size"); retry a few times before giving up.
+apt_update(){ local i; for i in 1 2 3 4 5; do apt-get update -qq && return 0; warn "apt-get update failed (attempt $i/5) — retrying in 5s"; sleep 5; done; die "apt-get update failed after 5 attempts"; }
 ver(){ [[ -n "$K8S_PATCH" ]] && echo "${K8S_PATCH}-1.1" || echo ""; }
 myip(){ [[ -n "$APISERVER_ADVERTISE_ADDRESS" ]] && echo "$APISERVER_ADVERTISE_ADDRESS" || ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}'; }
+
+# Resolve K8S_MINOR=latest|auto|empty -> the newest stable minor from upstream.
+# e.g. stable.txt = v1.37.0  ->  K8S_MINOR=1.37   (pin K8S_MINOR=1.36 to override)
+resolve_k8s_minor(){
+  case "${K8S_MINOR:-latest}" in
+    latest|auto|"")
+      local s; s="$(curl -fsSL https://dl.k8s.io/release/stable.txt 2>/dev/null || true)"
+      [[ "$s" =~ ^v[0-9]+\.[0-9]+ ]] || die "could not fetch latest Kubernetes version; set K8S_MINOR (e.g. 1.37)"
+      K8S_MINOR="$(echo "${s#v}" | cut -d. -f1,2)"
+      log "latest stable Kubernetes -> v${K8S_MINOR} (${s})"
+      ;;
+  esac
+}
 
 # ---------- node prep (shared by init & join) --------------------------------
 prep(){
   local P; P="$(pm)"
+  resolve_k8s_minor
   log "prep: swap off, kernel modules, sysctl"
   swapoff -a; sed -i.bak '/\bswap\b/ s/^/#/' /etc/fstab || true
   printf 'overlay\nbr_netfilter\n' >/etc/modules-load.d/k8s.conf
@@ -63,13 +95,13 @@ EOF
   log "installing containerd"
   if [[ "$P" == apt ]]; then
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
+    apt_update
     apt-get install -y -qq ca-certificates curl gnupg apt-transport-https
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release; echo "$VERSION_CODENAME") stable" >/etc/apt/sources.list.d/docker.list
-    apt-get update -qq; apt-get install -y -qq containerd.io
+    apt_update; apt-get install -y -qq containerd.io
   else
     dnf install -y -q dnf-plugins-core curl
     dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
@@ -86,7 +118,7 @@ EOF
     mkdir -p /etc/apt/keyrings
     curl -fsSL "https://pkgs.k8s.io/core:/stable:/v${K8S_MINOR}/deb/Release.key" | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
     echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${K8S_MINOR}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
-    apt-get update -qq
+    apt_update
     if [[ -n "$V" ]]; then apt-get install -y -qq kubelet="$V" kubeadm="$V" kubectl="$V"; else apt-get install -y -qq kubelet kubeadm kubectl; fi
     apt-mark hold kubelet kubeadm kubectl >/dev/null
     apt-get install -y -qq open-iscsi nfs-common
@@ -163,31 +195,139 @@ cmd_token(){
   echo "JOIN=\"$(kubeadm token create --print-join-command)\""
 }
 
-# ---------- longhorn storage -------------------------------------------------
+# ---------- storage: dispatch longhorn | nfs | none --------------------------
 cmd_storage(){
   export KUBECONFIG="${KUBECONFIG:-/etc/kubernetes/admin.conf}"
   command -v kubectl >/dev/null || die "run on a master"
+  case "$STORAGE" in
+    longhorn) storage_longhorn ;;
+    nfs)      storage_nfs ;;
+    none)     warn "STORAGE=none — skipping storage install" ;;
+    *) die "unknown STORAGE: $STORAGE (use longhorn | nfs | none)" ;;
+  esac
+}
+
+clear_default_sc(){ for sc in $(kubectl get sc -o name); do kubectl annotate "$sc" storageclass.kubernetes.io/is-default-class- >/dev/null 2>&1 || true; done; }
+
+storage_longhorn(){
   log "installing Longhorn ${LONGHORN_VERSION}"
   kubectl apply -f "https://raw.githubusercontent.com/longhorn/longhorn/${LONGHORN_VERSION}/deploy/longhorn.yaml"
   kubectl -n longhorn-system rollout status daemonset/longhorn-manager --timeout=600s || warn "longhorn-manager still rolling out"
   if [[ "$LONGHORN_SET_DEFAULT_SC" == true ]]; then
-    for sc in $(kubectl get sc -o name); do kubectl annotate "$sc" storageclass.kubernetes.io/is-default-class- >/dev/null 2>&1 || true; done
+    clear_default_sc
     kubectl annotate sc longhorn storageclass.kubernetes.io/is-default-class=true --overwrite
   fi
+  log "done:"; kubectl get sc
+}
+
+# NFS: deploy nfs-subdir-external-provisioner against an EXISTING NFS server.
+# The NFS server itself is set up separately (see scripts/nfs-server-setup.sh).
+storage_nfs(){
+  [[ -n "$NFS_SERVER" ]] || die "STORAGE=nfs needs NFS_SERVER (IP/host of the NFS server)"
+  log "installing NFS provisioner (server=${NFS_SERVER} path=${NFS_PATH} sc=${NFS_SC_NAME})"
+  kubectl create namespace "$NFS_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+  # RBAC
+  kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: nfs-client-provisioner, namespace: ${NFS_NAMESPACE} }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: { name: nfs-client-provisioner-runner }
+rules:
+  - { apiGroups: [""], resources: ["nodes"], verbs: ["get","list","watch"] }
+  - { apiGroups: [""], resources: ["persistentvolumes"], verbs: ["get","list","watch","create","delete"] }
+  - { apiGroups: [""], resources: ["persistentvolumeclaims"], verbs: ["get","list","watch","update"] }
+  - { apiGroups: ["storage.k8s.io"], resources: ["storageclasses"], verbs: ["get","list","watch"] }
+  - { apiGroups: [""], resources: ["events"], verbs: ["create","update","patch"] }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: run-nfs-client-provisioner }
+subjects:
+  - { kind: ServiceAccount, name: nfs-client-provisioner, namespace: ${NFS_NAMESPACE} }
+roleRef: { kind: ClusterRole, name: nfs-client-provisioner-runner, apiGroup: rbac.authorization.k8s.io }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: leader-locking-nfs-client-provisioner, namespace: ${NFS_NAMESPACE} }
+rules:
+  - { apiGroups: [""], resources: ["endpoints"], verbs: ["get","list","watch","create","update","patch"] }
+  - { apiGroups: ["coordination.k8s.io"], resources: ["leases"], verbs: ["get","list","watch","create","update","patch"] }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: leader-locking-nfs-client-provisioner, namespace: ${NFS_NAMESPACE} }
+subjects:
+  - { kind: ServiceAccount, name: nfs-client-provisioner, namespace: ${NFS_NAMESPACE} }
+roleRef: { kind: Role, name: leader-locking-nfs-client-provisioner, apiGroup: rbac.authorization.k8s.io }
+EOF
+
+  # Provisioner deployment
+  kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nfs-client-provisioner
+  namespace: ${NFS_NAMESPACE}
+  labels: { app: nfs-client-provisioner }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: nfs-client-provisioner } }
+  template:
+    metadata: { labels: { app: nfs-client-provisioner } }
+    spec:
+      serviceAccountName: nfs-client-provisioner
+      containers:
+        - name: nfs-client-provisioner
+          image: ${NFS_PROVISIONER_IMAGE}
+          volumeMounts:
+            - { name: nfs-client-root, mountPath: /persistentvolumes }
+          env:
+            - { name: PROVISIONER_NAME, value: k8s-sigs.io/nfs-subdir-external-provisioner }
+            - { name: NFS_SERVER, value: "${NFS_SERVER}" }
+            - { name: NFS_PATH, value: "${NFS_PATH}" }
+      volumes:
+        - name: nfs-client-root
+          nfs: { server: "${NFS_SERVER}", path: "${NFS_PATH}" }
+EOF
+
+  # StorageClass
+  local DEFAULT_ANN=""
+  [[ "$NFS_SET_DEFAULT_SC" == true ]] && { clear_default_sc; DEFAULT_ANN='storageclass.kubernetes.io/is-default-class: "true"'; }
+  kubectl apply -f - <<EOF
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ${NFS_SC_NAME}
+  annotations:
+    ${DEFAULT_ANN}
+provisioner: k8s-sigs.io/nfs-subdir-external-provisioner
+parameters:
+  archiveOnDelete: "false"
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+EOF
+
+  kubectl -n "$NFS_NAMESPACE" rollout status deploy/nfs-client-provisioner --timeout=300s || warn "provisioner still rolling out"
   log "done:"; kubectl get sc
 }
 
 # ---------- upgrade (one minor at a time) ------------------------------------
 cmd_upgrade(){
   need_root
-  local T="${1:?usage: upgrade <version e.g 1.31.2> <first-master|master|worker>}"
+  local T="${1:?usage: upgrade <version e.g 1.37.0> <first-master|master|worker>}"
   local ROLE="${2:?role: first-master|master|worker}"
   local P; P="$(pm)"; local M; M="$(echo "$T" | cut -d. -f1,2)"; local V="${T}-1.1"
   log "repo -> v${M}, install kubeadm ${T}"
   if [[ "$P" == apt ]]; then
     curl -fsSL "https://pkgs.k8s.io/core:/stable:/v${M}/deb/Release.key" | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
     echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${M}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
-    apt-get update -qq; apt-mark unhold kubeadm >/dev/null
+    apt_update; apt-mark unhold kubeadm >/dev/null
     apt-get install -y -qq --allow-change-held-packages kubeadm="$V"; apt-mark hold kubeadm >/dev/null
   else
     sed -i "s#v[0-9]*\.[0-9]*/rpm#v${M}/rpm#g" /etc/yum.repos.d/kubernetes.repo
@@ -223,14 +363,18 @@ k8s.sh — one-file Kubernetes installer
   init                         install first control plane + CNI
   join            (JOIN=...)   join this node (worker or master)
   token                        print a fresh JOIN=... command (run on a master)
-  storage                      install Longhorn + default StorageClass
+  storage                      install storage + default StorageClass
+                               (STORAGE=longhorn | nfs | none)
   upgrade <ver> <role>         role = first-master | master | worker
 
 Config via env vars: K8S_MINOR K8S_PATCH CNI HA_MODE POD_CIDR
-  CONTROL_PLANE_ENDPOINT APISERVER_ADVERTISE_ADDRESS LONGHORN_VERSION
+  CONTROL_PLANE_ENDPOINT APISERVER_ADVERTISE_ADDRESS
+  STORAGE LONGHORN_VERSION NFS_SERVER NFS_PATH NFS_SC_NAME
 
-Example:
-  curl -sfL $SELF_URL | sudo K8S_MINOR=1.31 CNI=flannel bash -s -- init
+Examples:
+  curl -sfL $SELF_URL | sudo K8S_MINOR=1.34 CNI=flannel bash -s -- init
+  curl -sfL $SELF_URL | sudo STORAGE=nfs NFS_SERVER=192.168.18.69 \
+    NFS_PATH=/srv/nfs/k8s bash -s -- storage
 EOF
   ;;
 esac

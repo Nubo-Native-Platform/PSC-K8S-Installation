@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # 05 — Upgrade Kubernetes. Run per node, control-plane FIRST.
 #
-#   # bump ONE minor at a time (e.g. 1.30 -> 1.31). k8s does not support
-#   # skipping minors. For 1.29 -> 1.31, run this twice.
+#   # bump ONE minor at a time (e.g. 1.36 -> 1.37). k8s does not support
+#   # skipping minors. For 1.35 -> 1.37, run this twice.
 #
-#   On the FIRST master:   sudo ./05-upgrade.sh 1.31.2 first-master
-#   On other masters:      sudo ./05-upgrade.sh 1.31.2 master
-#   On each worker:        sudo ./05-upgrade.sh 1.31.2 worker
+#   On the FIRST master:   sudo ./05-upgrade.sh 1.37.0 first-master
+#   On other masters:      sudo ./05-upgrade.sh 1.37.0 master
+#   On each worker:        sudo ./05-upgrade.sh 1.37.0 worker
 #
-# Arg1 = target full version (e.g. 1.31.2). Arg2 = role.
+# Arg1 = target full version (e.g. 1.37.0). Arg2 = role.
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 need_root
-TARGET="${1:?usage: 05-upgrade.sh <version e.g. 1.31.2> <first-master|master|worker>}"
+TARGET="${1:?usage: 05-upgrade.sh <version e.g. 1.37.0> <first-master|master|worker>}"
 ROLE="${2:?role required: first-master | master | worker}"
 PM="$(detect_pm)"
 MINOR="$(echo "$TARGET" | cut -d. -f1,2)"
@@ -23,7 +23,7 @@ if [[ "$PM" == apt ]]; then
     | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
   echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${MINOR}/deb/ /" \
     >/etc/apt/sources.list.d/kubernetes.list
-  apt-get update -qq
+  apt_update
   apt-mark unhold kubeadm >/dev/null
   apt-get install -y -qq --allow-change-held-packages kubeadm="$VER"
   apt-mark hold kubeadm >/dev/null
