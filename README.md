@@ -156,7 +156,8 @@ worker2  10.0.0.22
 `deploy.sh` will: prep every node → `kubeadm init` the first master → install
 the CNI → collect join tokens → join the other masters and all workers →
 install storage (Longhorn or NFS) → print `kubectl get nodes` → **fetch the
-admin kubeconfig to `./kubeconfig`** on your machine.
+admin kubeconfig to `./kubeconfig`** on your machine (unless
+`FETCH_KUBECONFIG=false`).
 
 Use it right away:
 ```bash
@@ -421,6 +422,7 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `NFS_SERVER` | *(empty)* | NFS server IP/host — **required when `STORAGE=nfs`** |
 | `NFS_PATH` | `/srv/nfs/k8s` | exported directory on the NFS server |
 | `NFS_SC_NAME` | `nfs-client` | StorageClass name to create (NFS) |
+| `FETCH_KUBECONFIG` | `true` | after install, copy the admin kubeconfig to `./kubeconfig` (`false` = don't) |
 | `SSH_USER` / `SSH_KEY` / `SSH_PORT` | `ubuntu` / `~/.ssh/id_rsa` / `22` | SSH access (orchestrated only) |
 
 > **Back-compat:** the old `LONGHORN=true/false` key still works — if `STORAGE`
