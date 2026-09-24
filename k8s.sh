@@ -98,7 +98,7 @@ EOF
     apt_update
     apt-get install -y -qq ca-certificates curl gnupg apt-transport-https
     install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release; echo "$VERSION_CODENAME") stable" >/etc/apt/sources.list.d/docker.list
     apt_update; apt-get install -y -qq containerd.io
@@ -116,7 +116,7 @@ EOF
   local V; V="$(ver)"
   if [[ "$P" == apt ]]; then
     mkdir -p /etc/apt/keyrings
-    curl -fsSL "https://pkgs.k8s.io/core:/stable:/v${K8S_MINOR}/deb/Release.key" | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    curl -fsSL "https://pkgs.k8s.io/core:/stable:/v${K8S_MINOR}/deb/Release.key" | gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
     echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${K8S_MINOR}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
     apt_update
     if [[ -n "$V" ]]; then apt-get install -y -qq kubelet="$V" kubeadm="$V" kubectl="$V"; else apt-get install -y -qq kubelet kubeadm kubectl; fi
@@ -325,7 +325,7 @@ cmd_upgrade(){
   local P; P="$(pm)"; local M; M="$(echo "$T" | cut -d. -f1,2)"; local V="${T}-1.1"
   log "repo -> v${M}, install kubeadm ${T}"
   if [[ "$P" == apt ]]; then
-    curl -fsSL "https://pkgs.k8s.io/core:/stable:/v${M}/deb/Release.key" | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    curl -fsSL "https://pkgs.k8s.io/core:/stable:/v${M}/deb/Release.key" | gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
     echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${M}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
     apt_update; apt-mark unhold kubeadm >/dev/null
     apt-get install -y -qq --allow-change-held-packages kubeadm="$V"; apt-mark hold kubeadm >/dev/null
