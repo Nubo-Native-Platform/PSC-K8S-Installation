@@ -126,6 +126,7 @@ VPA_VERSION="${SET[VPA_VERSION]:-1.8.0}"
 PROMETHEUS="${SET[PROMETHEUS]:-true}"
 PROMETHEUS_RETENTION="${SET[PROMETHEUS_RETENTION]:-7d}"
 PROMETHEUS_STORAGE_CLASS="${SET[PROMETHEUS_STORAGE_CLASS]:-}"
+BACKUP_ALERTS="${SET[BACKUP_ALERTS]:-true}"      # Prometheus alerts if backups stop
 
 # ---- Backups to S3 (need S3 creds; keep those in a private *.local.conf) ----
 VELERO="${SET[VELERO]:-false}"                 # Velero -> S3 (cluster + PV data)
@@ -321,6 +322,7 @@ cmd_install(){
   [[ "$OPENBAO" == true ]] && cmd_openbao
   [[ "$VELERO" == true ]] && cmd_velero
   [[ "$NFS_S3_SYNC" == true ]] && cmd_nfs_s3
+  [[ "$BACKUP_ALERTS" == true && "$PROMETHEUS" == true ]] && cmd_backup_alerts
 
   if [[ "$FETCH_KUBECONFIG" == true ]]; then
     fetch_kubeconfig
@@ -393,6 +395,14 @@ cmd_nfs_s3(){
   local M0="${M_IP[0]}"; step "installing NFS->S3 sync (via $M0)"
   push_as "$SSH_USER" "$M0" "$HERE/scripts/13-nfs-s3-sync.sh"
   rsh "$M0" "sudo NFS_S3_BUCKET='$NFS_S3_BUCKET' NFS_S3_PREFIX='$NFS_S3_PREFIX' NFS_S3_STORAGE_CLASS='$NFS_S3_STORAGE_CLASS' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' bash /tmp/13-nfs-s3-sync.sh"
+}
+
+# Install backup alerting (Prometheus rules + Velero ServiceMonitor).
+cmd_backup_alerts(){
+  [[ -f "$HERE/scripts/14-backup-alerts.sh" ]] || die "scripts/14-backup-alerts.sh not found"
+  local M0="${M_IP[0]}"; step "installing backup alerts (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/14-backup-alerts.sh"
+  rsh "$M0" "sudo bash /tmp/14-backup-alerts.sh"
 }
 
 # Install Knative (Serving + optional Eventing) on Istio, via the first master.
@@ -507,8 +517,9 @@ case "$ACTION" in
   openbao)    cmd_openbao ;;
   velero)     cmd_velero ;;
   nfs-s3-sync) cmd_nfs_s3 ;;
+  backup-alerts) cmd_backup_alerts ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | kubeconfig | upgrade <ver> | reset)";;
 esac

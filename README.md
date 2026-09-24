@@ -237,6 +237,7 @@ credentials and is git-ignored — keep it safe.)
 ./deploy.sh prometheus          # install Prometheus (no Grafana)
 ./deploy.sh velero              # install Velero, back up cluster + PV data to S3
 ./deploy.sh nfs-s3-sync         # CronJob: sync the raw NFS export to S3
+./deploy.sh backup-alerts       # Prometheus alerts if backups stop succeeding
 ./deploy.sh knative             # install Knative (Serving/Eventing) on Istio
 ./deploy.sh argocd              # install Argo CD (GitOps)
 ./deploy.sh openbao             # install OpenBao (HA Raft secret manager)
@@ -645,7 +646,7 @@ snapshot save`).
 > `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
 
 **Retention & cost:** Velero backups expire after **15 days** (Velero deletes
-them); the `nfs-backup/` prefix expires after **3 days** via an S3 lifecycle rule.
+them); the `nfs-backup/` prefix expires after **7 days** via an S3 lifecycle rule.
 `monitoring` is excluded from Velero and `archived-*` from the NFS sync to cut
 size. Objects use `STANDARD` (cheapest for short retention — IA/Glacier minimum
 durations would cost more). The bucket has default AES256 encryption and public
@@ -769,6 +770,7 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `scripts/11-prometheus.sh` | install Prometheus (kube-prometheus-stack, no Grafana) |
 | `scripts/12-velero.sh` | install Velero and back up the cluster + PV data to AWS S3 |
 | `scripts/13-nfs-s3-sync.sh` | CronJob that syncs the raw NFS export to S3 |
+| `scripts/14-backup-alerts.sh` | Prometheus alerts + Velero ServiceMonitor for backup failures |
 | `scripts/06-knative-istio.sh` | install Knative (Serving/Eventing) on Istio + sidecar injection |
 | `scripts/07-argocd.sh` | install Argo CD (GitOps continuous delivery) |
 | `scripts/08-openbao.sh` | install OpenBao (HA Raft secret manager) + init/unseal |

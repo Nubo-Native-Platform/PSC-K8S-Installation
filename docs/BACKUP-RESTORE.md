@@ -21,8 +21,9 @@ importantly — **how to restore**.
   deletes the expired backups' S3 objects itself. The `monitoring` namespace is
   **excluded** (`VELERO_EXCLUDE_NAMESPACES`) because the Prometheus TSDB is large
   and reproducible.
-- **NFS→S3**: an S3 **lifecycle rule expires the `nfs-backup/` prefix after 3
+- **NFS→S3**: an S3 **lifecycle rule expires the `nfs-backup/` prefix after 7
   days**. The sync skips the transient `archived-*` copies to save space.
+  (7 days so the copies survive a multi-day outage; see "Outages" below.)
 - **Storage class**: objects use `STANDARD`. For 3–15 day retention this is the
   cheapest option — `STANDARD_IA`/Glacier have 30/90-day *minimum-duration*
   charges that make short-lived backups **more** expensive, so don't use them
@@ -43,6 +44,38 @@ Check current usage/cost:
 ```bash
 aws s3 ls s3://<BUCKET> --recursive --summarize | tail -2   # object count + total bytes
 ```
+
+### Storage tiers (why we stay on STANDARD)
+
+Tiered transitions (STANDARD → IA → Glacier) only save money for data kept for
+**months**. For short retention (7–15 days) they cost **more**, because:
+- STANDARD_IA / One Zone-IA have a **30-day minimum-duration charge**, and S3
+  won't even transition to them until an object is **30 days old**.
+- Glacier / Glacier IR have **90-day** minimums; Deep Archive **180**.
+So a 7-day object moved to Glacier is billed for 90 days. **STANDARD + expiry is
+the cheapest option here** (and the data is tiny anyway). Use Glacier tiers only
+for a *separate* long-term/compliance archive (e.g. a monthly backup kept a year).
+
+### Outages
+
+Retention is age-based on S3 for NFS→S3 (server-side, runs even while the cluster
+is down) but TTL-based for Velero (enforced by Velero, which pauses while it's
+down). So during a long outage:
+- **NFS→S3** copies older than 7 days are deleted by the lifecycle rule.
+- **Velero** backups are **not** deleted while the cluster is off; on restart you
+  still have any that were <15 days old.
+- Either way, **no new backups are taken while down** — the `VeleroNoRecentSuccessfulBackup`
+  / `NFSBackupCronStale` alerts (below) tell you backups have stopped.
+- Remember: a powered-off server's **live data is intact** on boot; backups only
+  matter if the primary data is lost.
+
+### Alerting
+
+`./deploy.sh backup-alerts` installs a Velero ServiceMonitor + a PrometheusRule
+(`backup-alerts`) with: `VeleroNoRecentSuccessfulBackup` (no success in ~36h),
+`VeleroBackupFailing`, `VeleroBackupMetricsMissing`, and `NFSBackupCronStale`.
+Wire these to Sysdig/Alertmanager. Note: Velero (and the file sync) **cannot**
+back up OpenBao's private files — use the OpenBao raft snapshot below.
 
 ---
 
