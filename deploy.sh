@@ -83,6 +83,9 @@ NFS_SERVER="${SET[NFS_SERVER]:-}"; NFS_PATH="${SET[NFS_PATH]:-/srv/nfs/k8s}"
 NFS_SC_NAME="${SET[NFS_SC_NAME]:-nfs-client}"
 [[ "$STORAGE" == nfs && -z "$NFS_SERVER" ]] && die "STORAGE=nfs — set NFS_SERVER (NFS server IP) in inventory.conf"
 
+# Fetch the admin kubeconfig to this machine at the end of install? (true|false)
+FETCH_KUBECONFIG="${SET[FETCH_KUBECONFIG]:-true}"
+
 # HA auto-detect
 if [[ ${#MASTERS[@]} -gt 1 ]]; then
   HA_MODE=multi
@@ -172,7 +175,11 @@ cmd_install(){
   fi
 
   step "DONE"; rsh "$M0" "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide" || true
-  fetch_kubeconfig
+  if [[ "$FETCH_KUBECONFIG" == true ]]; then
+    fetch_kubeconfig
+  else
+    log "FETCH_KUBECONFIG=false — skipping. Get it later with: ./deploy.sh kubeconfig"
+  fi
 }
 
 # Pull admin.conf from the primary master to THIS machine so kubectl works
