@@ -640,17 +640,20 @@ app's private 0600 data, e.g. OpenBao's raft files) — the job still succeeds. 
 those, rely on Velero or the app's own snapshot (OpenBao: `bao operator raft
 snapshot save`).
 
-> Inventory keys: `VELERO`, `VELERO_BUCKET`, `VELERO_TTL` (default 15d),
-> `VELERO_EXCLUDE_NAMESPACES` (default `monitoring`), `NFS_S3_SYNC`,
-> `NFS_S3_BUCKET`, `NFS_S3_PREFIX`, `NFS_S3_STORAGE_CLASS`, `AWS_REGION`,
-> `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
+> Inventory keys: `VELERO`, `VELERO_BUCKET`, `VELERO_KEEP` (default 15),
+> `VELERO_TTL` (default 30d backstop), `VELERO_EXCLUDE_NAMESPACES` (default
+> `monitoring`), `NFS_S3_SYNC`, `NFS_S3_BUCKET`, `NFS_S3_PREFIX`, `NFS_S3_KEEP`
+> (default 4), `NFS_S3_STORAGE_CLASS`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`,
+> `AWS_SECRET_ACCESS_KEY`.
 
-**Retention & cost:** Velero backups expire after **15 days** (Velero deletes
-them); the `nfs-backup/` prefix expires after **7 days** via an S3 lifecycle rule.
-`monitoring` is excluded from Velero and `archived-*` from the NFS sync to cut
-size. Objects use `STANDARD` (cheapest for short retention — IA/Glacier minimum
-durations would cost more). The bucket has default AES256 encryption and public
-access blocked.
+**Retention & cost (count-based + 30-day backstop):** a pruner always keeps the
+**newest 15 Velero** backups (`VELERO_KEEP`) and the **newest 4 NFS daily
+snapshots** (`NFS_S3_KEEP`) — so an outage can't age them away. A **30-day**
+Velero TTL / S3 lifecycle is only a backstop (clears backups if they've been
+abandoned that long). `monitoring` is excluded from Velero and `archived-*` from
+the NFS sync to cut size. Objects use `STANDARD` (cheapest for this retention —
+IA/Glacier minimum durations would cost more). Bucket has AES256 encryption +
+public access blocked.
 
 **Full restore procedures: [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)** —
 Velero (full / per-namespace / selective), raw NFS→S3 file recovery, and OpenBao

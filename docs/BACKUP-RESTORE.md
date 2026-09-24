@@ -17,13 +17,22 @@ importantly — **how to restore**.
 
 ## Retention & cost
 
-- **Velero**: backups expire after **15 days** (`VELERO_TTL=360h0m0s`); Velero
-  deletes the expired backups' S3 objects itself. The `monitoring` namespace is
-  **excluded** (`VELERO_EXCLUDE_NAMESPACES`) because the Prometheus TSDB is large
-  and reproducible.
-- **NFS→S3**: an S3 **lifecycle rule expires the `nfs-backup/` prefix after 7
-  days**. The sync skips the transient `archived-*` copies to save space.
-  (7 days so the copies survive a multi-day outage; see "Outages" below.)
+Retention is **count-based** ("always keep the newest N"), with a **30-day
+age-based backstop**. Count-based is deliberate: an outage can't age your
+backups away — you always have the last N until newer ones replace them.
+
+- **Velero**: a pruner CronJob (`velero-backup-pruner`) **always keeps the newest
+  15** daily backups (`VELERO_KEEP=15`); the schedule TTL (`VELERO_TTL=720h`, 30d)
+  is only a backstop so truly abandoned backups clear after 30 days. The
+  `monitoring` namespace is excluded (large/reproducible Prometheus TSDB).
+- **NFS→S3**: each run writes a **dated snapshot** `nfs-backup/<YYYY-MM-DD>/`, and
+  the job **always keeps the newest 4** (`NFS_S3_KEEP=4`), pruning older ones. An
+  S3 lifecycle rule expires `nfs-backup/` after **30 days** as a backstop only.
+  The sync skips the transient `archived-*` copies.
+
+So at any moment you have the last **15 Velero** and last **4 NFS** backups — and
+if backups stop entirely, the last good ones survive up to **30 days** (then the
+backstop clears them). The alerts below tell you backups have stopped.
 - **Storage class**: objects use `STANDARD`. For 3–15 day retention this is the
   cheapest option — `STANDARD_IA`/Glacier have 30/90-day *minimum-duration*
   charges that make short-lived backups **more** expensive, so don't use them
@@ -58,16 +67,15 @@ for a *separate* long-term/compliance archive (e.g. a monthly backup kept a year
 
 ### Outages
 
-Retention is age-based on S3 for NFS→S3 (server-side, runs even while the cluster
-is down) but TTL-based for Velero (enforced by Velero, which pauses while it's
-down). So during a long outage:
-- **NFS→S3** copies older than 7 days are deleted by the lifecycle rule.
-- **Velero** backups are **not** deleted while the cluster is off; on restart you
-  still have any that were <15 days old.
-- Either way, **no new backups are taken while down** — the `VeleroNoRecentSuccessfulBackup`
-  / `NFSBackupCronStale` alerts (below) tell you backups have stopped.
-- Remember: a powered-off server's **live data is intact** on boot; backups only
-  matter if the primary data is lost.
+Because retention is **count-based** (keep newest N), a cluster outage does **not**
+age your backups away — the last 15 Velero / last 4 NFS snapshots remain. The
+**30-day backstop** only removes them if backups have been stopped that long
+(both pruners and the S3 lifecycle only delete beyond the kept count, and the
+lifecycle/TTL are set to 30 days). Notes:
+- **No new backups are taken while down** — the `VeleroNoRecentSuccessfulBackup` /
+  `NFSBackupCronStale` alerts (below) tell you backups have stopped.
+- A powered-off server's **live data is intact** on boot; backups only matter if
+  the primary data is actually lost.
 
 ### Alerting
 

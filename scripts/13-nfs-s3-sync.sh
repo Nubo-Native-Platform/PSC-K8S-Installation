@@ -31,7 +31,8 @@ AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}"
 NFS_SERVER="${NFS_SERVER:?set NFS_SERVER}"
 NFS_PATH="${NFS_PATH:-/srv/nfs/k8s}"
 NFS_S3_SCHEDULE="${NFS_S3_SCHEDULE:-30 3 * * *}"
-NFS_S3_STORAGE_CLASS="${NFS_S3_STORAGE_CLASS:-STANDARD}"   # STANDARD is cheapest for short (3d) retention
+NFS_S3_STORAGE_CLASS="${NFS_S3_STORAGE_CLASS:-STANDARD}"   # STANDARD is cheapest for short retention
+NFS_S3_KEEP="${NFS_S3_KEEP:-4}"          # always keep the last N daily snapshots (count-based)
 NS="${NFS_S3_NAMESPACE:-nfs-provisioner}"
 export KUBECONFIG="${KUBECONFIG:-/etc/kubernetes/admin.conf}"
 g='\033[0;32m'; y='\033[0;33m'; r='\033[0;31m'; n='\033[0m'
@@ -67,25 +68,30 @@ spec:
               image: amazon/aws-cli:2.17.20
               env:
                 - { name: AWS_DEFAULT_REGION, value: "${AWS_REGION}" }
+                - { name: KEEP, value: "${NFS_S3_KEEP}" }
                 - name: AWS_ACCESS_KEY_ID
                   valueFrom: { secretKeyRef: { name: nfs-s3-aws-creds, key: AWS_ACCESS_KEY_ID } }
                 - name: AWS_SECRET_ACCESS_KEY
                   valueFrom: { secretKeyRef: { name: nfs-s3-aws-creds, key: AWS_SECRET_ACCESS_KEY } }
               command: ["/bin/sh","-c"]
               args:
-                # aws s3 sync exits 2 when it merely SKIPS unreadable files (e.g.
-                # another app's private 0600 data like OpenBao's raft files); that
-                # is not a failure for a best-effort file-level backup. Only a real
-                # error (exit 1) should fail the job.
+                # Write a DATED daily snapshot, then keep only the newest KEEP
+                # snapshots (count-based: an outage can't age them away). aws s3
+                # sync exits 2 when it merely SKIPS unreadable files (e.g. OpenBao's
+                # private 0600 data) — not a real failure. Only exit 1 fails the job.
                 - |
-                  # Skip the transient archived-* recovery copies (kept locally,
-                  # pruned to last 3) to save S3 cost; use the chosen storage class.
-                  aws s3 sync /export "s3://${NFS_S3_BUCKET}/${NFS_S3_PREFIX}/" --no-progress \
-                    --exclude "archived-*/*" --storage-class ${NFS_S3_STORAGE_CLASS}; rc=\$?
-                  if [ "\$rc" = "0" ] || [ "\$rc" = "2" ]; then
-                    echo "nfs->s3 sync done (rc=\$rc; rc=2 = some unreadable files skipped)"; exit 0
-                  fi
-                  echo "nfs->s3 sync FAILED (rc=\$rc)"; exit "\$rc"
+                  DATE=\$(date +%F)
+                  DEST="s3://${NFS_S3_BUCKET}/${NFS_S3_PREFIX}/\${DATE}/"
+                  echo "syncing to \${DEST}"
+                  aws s3 sync /export "\${DEST}" --no-progress --exclude "archived-*/*" \
+                    --storage-class ${NFS_S3_STORAGE_CLASS}; rc=\$?
+                  if [ "\$rc" != "0" ] && [ "\$rc" != "2" ]; then echo "sync FAILED (rc=\$rc)"; exit "\$rc"; fi
+                  echo "sync done (rc=\$rc); pruning to newest ${NFS_S3_KEEP} snapshots"
+                  aws s3 ls "s3://${NFS_S3_BUCKET}/${NFS_S3_PREFIX}/" | awk '/ PRE /{print \$2}' | sed 's#/\$##' \
+                    | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}\$' | sort | head -n -\${KEEP} | while read -r d; do
+                        echo "pruning snapshot \$d"; aws s3 rm "s3://${NFS_S3_BUCKET}/${NFS_S3_PREFIX}/\${d}/" --recursive --only-show-errors
+                      done
+                  echo "nfs->s3 done (kept newest ${NFS_S3_KEEP} daily snapshots)"
               volumeMounts: [{ name: export, mountPath: /export, readOnly: true }]
           volumes:
             - name: export

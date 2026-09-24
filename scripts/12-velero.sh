@@ -15,7 +15,10 @@
 #   VELERO_VERSION        default v1.16.1
 #   VELERO_PLUGIN_AWS     default v1.12.1
 #   VELERO_SCHEDULE       default "0 3 * * *" (daily 03:00); "" to skip the schedule
-#   VELERO_TTL            default 360h0m0s (15d backup retention in S3)
+#   VELERO_KEEP           default 15 — ALWAYS keep the newest N backups (count-based;
+#                         an outage can't age them away). A pruner CronJob enforces it.
+#   VELERO_TTL            default 720h0m0s (30d) — safety backstop only: backups are
+#                         removed once they are BOTH beyond the newest N and 30d old.
 #   VELERO_EXCLUDE_NAMESPACES  default "monitoring" (skip large/ephemeral data to
 #                              save S3 cost; comma-separated)
 set -euo pipefail
@@ -26,7 +29,8 @@ AWS_REGION="${AWS_REGION:?set AWS_REGION}"
 AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID}"
 AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}"
 VELERO_SCHEDULE="${VELERO_SCHEDULE:-0 3 * * *}"
-VELERO_TTL="${VELERO_TTL:-360h0m0s}"
+VELERO_KEEP="${VELERO_KEEP:-15}"
+VELERO_TTL="${VELERO_TTL:-720h0m0s}"
 VELERO_EXCLUDE_NAMESPACES="${VELERO_EXCLUDE_NAMESPACES:-monitoring}"
 export KUBECONFIG="${KUBECONFIG:-/etc/kubernetes/admin.conf}"
 g='\033[0;32m'; y='\033[0;33m'; r='\033[0;31m'; n='\033[0m'
@@ -79,6 +83,61 @@ if [[ -n "$VELERO_SCHEDULE" ]]; then
   velero schedule create daily-all --schedule "${VELERO_SCHEDULE}" --ttl "${VELERO_TTL}" \
     --default-volumes-to-fs-backup "${EXC[@]}" 2>/dev/null || warn "could not create schedule"
 fi
+
+# --- keep-last-N pruner: ALWAYS retain the newest VELERO_KEEP backups ---------
+# Count-based, so an outage can't age them away; TTL above is only a 30d backstop.
+log "installing Velero keep-last-${VELERO_KEEP} pruner CronJob"
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata: { name: velero-pruner, namespace: velero }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: velero-pruner, namespace: velero }
+rules:
+  - { apiGroups: ["velero.io"], resources: ["backups"], verbs: ["get","list"] }
+  - { apiGroups: ["velero.io"], resources: ["deletebackuprequests"], verbs: ["create"] }
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: velero-pruner, namespace: velero }
+subjects: [{ kind: ServiceAccount, name: velero-pruner, namespace: velero }]
+roleRef: { kind: Role, name: velero-pruner, apiGroup: rbac.authorization.k8s.io }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata: { name: velero-backup-pruner, namespace: velero }
+spec:
+  schedule: "45 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          serviceAccountName: velero-pruner
+          containers:
+            - name: pruner
+              image: alpine/k8s:1.31.1
+              env: [{ name: KEEP, value: "${VELERO_KEEP}" }]
+              command: ["/bin/sh","-c"]
+              args:
+                - |
+                  set -e
+                  names=\$(kubectl get backups.velero.io -n velero -l velero.io/schedule-name=daily-all \
+                    --sort-by=.metadata.creationTimestamp -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+                  echo "\$names" | grep -c . | xargs -I{} echo "total daily-all backups: {}"
+                  echo "\$names" | head -n -\${KEEP} | while read -r b; do
+                    [ -z "\$b" ] && continue
+                    echo "pruning backup \$b"
+                    echo "{\"apiVersion\":\"velero.io/v1\",\"kind\":\"DeleteBackupRequest\",\"metadata\":{\"generateName\":\"prune-\"},\"spec\":{\"backupName\":\"\$b\"}}" | kubectl -n velero create -f - >/dev/null
+                  done
+                  echo "velero prune done (kept newest \${KEEP})"
+EOF
 
 echo
 log "================= VELERO READY ================="
