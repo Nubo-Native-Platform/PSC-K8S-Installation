@@ -3,9 +3,10 @@
 #  deploy.sh — orchestrate a whole cluster from ONE machine (Ansible-style).
 #  Reads inventory.conf, SSHes to every node, and runs k8s.sh on each.
 #
-#    ./deploy.sh                 # full install (all nodes) + storage
+#    ./deploy.sh                 # ONE-SHOT: provision LB/NFS (if set) + build all
 #    ./deploy.sh -i my.conf      # use a different inventory
 #    ./deploy.sh check           # test SSH + sudo to every node
+#    ./deploy.sh provision       # only set up the LB and/or NFS server
 #    ./deploy.sh storage         # (re)install storage (Longhorn or NFS) only
 #    ./deploy.sh kubeconfig      # fetch admin kubeconfig to ./kubeconfig
 #    ./deploy.sh upgrade 1.37.0  # rolling upgrade of the whole cluster
@@ -86,10 +87,22 @@ NFS_SC_NAME="${SET[NFS_SC_NAME]:-nfs-client}"
 # Fetch the admin kubeconfig to this machine at the end of install? (true|false)
 FETCH_KUBECONFIG="${SET[FETCH_KUBECONFIG]:-true}"
 
+# ---- optional auto-provisioning of the LB and NFS server (one-shot install) --
+# LB_HOST: host to run HAProxy on (fronts the masters for HA). If set, deploy.sh
+#          installs HAProxy there and uses LB_HOST:6443 as the endpoint.
+# NFS_SETUP=true: deploy.sh sets up the NFS server on NFS_SERVER first.
+# These hosts may use a different SSH user (e.g. a Debian proxy) — override with
+# LB_SSH_USER / NFS_SSH_USER.
+LB_HOST="${SET[LB_HOST]:-}";        LB_SSH_USER="${SET[LB_SSH_USER]:-$SSH_USER}"
+NFS_SETUP="${SET[NFS_SETUP]:-false}"; NFS_SSH_USER="${SET[NFS_SSH_USER]:-$SSH_USER}"
+NFS_CIDR="${SET[NFS_CIDR]:-}"
+
 # HA auto-detect
 if [[ ${#MASTERS[@]} -gt 1 ]]; then
   HA_MODE=multi
-  [[ -n "$CPE" ]] || die "You listed ${#MASTERS[@]} masters (HA) — set CONTROL_PLANE_ENDPOINT (VIP/LB) in inventory.conf"
+  # If no endpoint given but an LB host is, derive the endpoint from it.
+  [[ -z "$CPE" && -n "$LB_HOST" ]] && CPE="${LB_HOST}:6443"
+  [[ -n "$CPE" ]] || die "You listed ${#MASTERS[@]} masters (HA) — set CONTROL_PLANE_ENDPOINT, or set LB_HOST to auto-provision HAProxy, in inventory.conf"
 else
   HA_MODE=single
 fi
@@ -100,6 +113,25 @@ SSH_OPTS=( -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 )
 [[ -n "$SSH_KEY" ]] && SSH_OPTS+=( -i "$SSH_KEY" )
 rsh(){ ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" "${SSH_USER}@$1" "$2"; }
 push(){ scp "${SSH_OPTS[@]}" -P "$SSH_PORT" "$HERE/k8s.sh" "${SSH_USER}@$1:/tmp/k8s.sh" >/dev/null; }
+# generic variants that take an explicit user + file (for LB/NFS hosts)
+rsh_as(){ ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" "$1@$2" "$3"; }
+push_as(){ scp "${SSH_OPTS[@]}" -P "$SSH_PORT" "$3" "$1@$2:/tmp/$(basename "$3")" >/dev/null; }
+
+# Provision the LB (HAProxy) and/or NFS server if the inventory asks for it.
+provision_infra(){
+  if [[ "$STORAGE" == nfs && "$NFS_SETUP" == true ]]; then
+    [[ -f "$HERE/scripts/nfs-server-setup.sh" ]] || die "scripts/nfs-server-setup.sh not found"
+    step "0/4  provisioning NFS server on $NFS_SERVER (user $NFS_SSH_USER)"
+    push_as "$NFS_SSH_USER" "$NFS_SERVER" "$HERE/scripts/nfs-server-setup.sh"
+    rsh_as "$NFS_SSH_USER" "$NFS_SERVER" "sudo NFS_PATH='$NFS_PATH' ${NFS_CIDR:+NFS_CIDR='$NFS_CIDR'} bash /tmp/nfs-server-setup.sh"
+  fi
+  if [[ "$HA_MODE" == multi && -n "$LB_HOST" ]]; then
+    [[ -f "$HERE/scripts/lb-haproxy-setup.sh" ]] || die "scripts/lb-haproxy-setup.sh not found"
+    step "0/4  provisioning HAProxy LB on $LB_HOST (user $LB_SSH_USER)"
+    push_as "$LB_SSH_USER" "$LB_HOST" "$HERE/scripts/lb-haproxy-setup.sh"
+    rsh_as "$LB_SSH_USER" "$LB_HOST" "sudo bash /tmp/lb-haproxy-setup.sh ${M_IP[*]}"
+  fi
+}
 
 # common env prefix passed into k8s.sh on the remote node
 envstr(){
@@ -120,7 +152,8 @@ print_plan(){
   else
     echo "  cni       : $CNI    storage: $STORAGE"
   fi
-  [[ $HA_MODE == multi ]] && echo "  endpoint  : $CPE"
+  [[ $HA_MODE == multi ]] && echo "  endpoint  : $CPE${LB_HOST:+  (HAProxy auto-provision on $LB_HOST)}"
+  [[ "$STORAGE" == nfs && "$NFS_SETUP" == true ]] && echo "  nfs-setup : yes (auto-provision on $NFS_SERVER)"
   echo "  ssh       : ${SSH_USER}@... :$SSH_PORT ${SSH_KEY:+key=$SSH_KEY}"
   printf "  masters   :"; for i in "${!MASTERS[@]}"; do printf " %s(%s)" "${MASTERS[$i]}" "${M_IP[$i]}"; done; echo
   printf "  workers   :"; for i in "${!WORKERS[@]}"; do printf " %s(%s)" "${WORKERS[$i]}" "${W_IP[$i]}"; done; echo
@@ -141,6 +174,8 @@ cmd_check(){
 cmd_install(){
   print_plan
   echo; read -rp "Proceed with install? [y/N] " a; [[ "$a" =~ ^[Yy]$ ]] || die "aborted"
+
+  provision_infra
 
   local M0="${M_IP[0]}"
   step "1/4  init primary master  ${MASTERS[0]} ($M0)"
@@ -231,9 +266,10 @@ cmd_reset(){
 case "$ACTION" in
   check)      cmd_check ;;
   install)    cmd_install ;;
+  provision)  print_plan; provision_infra ;;
   storage)    cmd_storage ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | install | storage | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | install | provision | storage | kubeconfig | upgrade <ver> | reset)";;
 esac

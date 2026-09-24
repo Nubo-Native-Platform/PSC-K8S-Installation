@@ -153,6 +153,22 @@ worker2  10.0.0.22
 ./deploy.sh                # build the ENTIRE cluster + storage
 ```
 
+**One-shot, including the LB and NFS server.** For HA you need a control-plane
+load balancer, and for NFS storage you need an NFS server. Rather than preparing
+those by hand, declare them in the inventory and `deploy.sh` sets them up first,
+then builds the cluster — all from the single `./deploy.sh` command:
+```ini
+LB_HOST=192.168.18.51      # auto-install HAProxy here; endpoint = LB_HOST:6443
+LB_SSH_USER=debian         # if the LB host uses a different SSH user
+STORAGE=nfs
+NFS_SERVER=192.168.18.69
+NFS_SETUP=true             # auto-install the NFS server on NFS_SERVER
+NFS_CIDR=192.168.18.0/24
+```
+(You can also run just the infra step with `./deploy.sh provision`.) See the
+ready-made [`prod1-cluster.conf`](prod1-cluster.conf) for a full 3-master +
+5-worker + NFS example.
+
 `deploy.sh` will: prep every node → `kubeadm init` the first master → install
 the CNI → collect join tokens → join the other masters and all workers →
 install storage (Longhorn or NFS) → print `kubectl get nodes` → **fetch the
@@ -430,6 +446,11 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `NFS_SERVER` | *(empty)* | NFS server IP/host — **required when `STORAGE=nfs`** |
 | `NFS_PATH` | `/srv/nfs/k8s` | exported directory on the NFS server |
 | `NFS_SC_NAME` | `nfs-client` | StorageClass name to create (NFS) |
+| `NFS_SETUP` | `false` | `true` = `deploy.sh` sets up the NFS server on `NFS_SERVER` automatically |
+| `NFS_CIDR` | auto | network allowed to mount the NFS export (e.g. `192.168.18.0/24`) |
+| `NFS_SSH_USER` | `SSH_USER` | SSH user for the NFS host (if different) |
+| `LB_HOST` | *(empty)* | host to auto-provision HAProxy on for HA; endpoint becomes `LB_HOST:6443` |
+| `LB_SSH_USER` | `SSH_USER` | SSH user for the LB host (e.g. `debian` on a Debian proxy) |
 | `FETCH_KUBECONFIG` | `true` | after install, copy the admin kubeconfig to `./kubeconfig` (`false` = don't) |
 | `SSH_USER` / `SSH_KEY` / `SSH_PORT` | `ubuntu` / `~/.ssh/id_rsa` / `22` | SSH access (orchestrated only) |
 
