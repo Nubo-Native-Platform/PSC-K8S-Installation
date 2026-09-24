@@ -4,6 +4,10 @@ admin.conf
 kubeconfig
 .env
 
+# private inventories that may hold node passwords (bootstrap column) — never commit
+*.local.conf
+secrets.conf
+
 # generated join commands (contain cluster tokens)
 config/join-*.sh
 

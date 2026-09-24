@@ -3,10 +3,13 @@
 #  deploy.sh — orchestrate a whole cluster from ONE machine (Ansible-style).
 #  Reads inventory.conf, SSHes to every node, and runs k8s.sh on each.
 #
-#    ./deploy.sh                 # full install (all nodes) + storage
+#    ./deploy.sh                 # ONE-SHOT: bootstrap + provision LB/NFS + build all
 #    ./deploy.sh -i my.conf      # use a different inventory
 #    ./deploy.sh check           # test SSH + sudo to every node
+#    ./deploy.sh bootstrap       # only install SSH keys + passwordless sudo
+#    ./deploy.sh provision       # only set up the LB and/or NFS server
 #    ./deploy.sh storage         # (re)install storage (Longhorn or NFS) only
+#    ./deploy.sh kubeconfig      # fetch admin kubeconfig to ./kubeconfig
 #    ./deploy.sh upgrade 1.37.0  # rolling upgrade of the whole cluster
 #    ./deploy.sh reset           # kubeadm reset every node (DESTROYS cluster)
 #
@@ -31,7 +34,10 @@ die(){ echo -e "${r}[x]${n} $*" >&2; exit 1; }
 [[ -f "$HERE/k8s.sh" ]] || die "k8s.sh not found next to deploy.sh"
 
 # ---- parse inventory.conf ----
-declare -A SET; MASTERS=(); WORKERS=(); M_IP=(); W_IP=(); section=""
+# Node lines are:  <name>  <ip>  [password]
+# The optional 3rd column is used ONLY for the one-time SSH bootstrap (install
+# key + passwordless sudo). Keep passwords in a private, git-ignored inventory.
+declare -A SET; MASTERS=(); WORKERS=(); M_IP=(); W_IP=(); M_PW=(); W_PW=(); section=""
 while IFS= read -r line || [[ -n "$line" ]]; do
   line="${line%%#*}"; line="$(echo "$line" | sed 's/[[:space:]]*$//;s/^[[:space:]]*//')"
   [[ -z "$line" ]] && continue
@@ -43,11 +49,11 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   if [[ "$section" == settings ]]; then
     k="${line%%=*}"; v="${line#*=}"; SET[$k]="$v"
   elif [[ "$section" == masters ]]; then
-    name="$(awk '{print $1}' <<<"$line")"; ip="$(awk '{print $2}' <<<"$line")"
-    MASTERS+=("$name"); M_IP+=("$ip")
+    name="$(awk '{print $1}' <<<"$line")"; ip="$(awk '{print $2}' <<<"$line")"; pw="$(awk '{print $3}' <<<"$line")"
+    MASTERS+=("$name"); M_IP+=("$ip"); M_PW+=("$pw")
   elif [[ "$section" == workers ]]; then
-    name="$(awk '{print $1}' <<<"$line")"; ip="$(awk '{print $2}' <<<"$line")"
-    WORKERS+=("$name"); W_IP+=("$ip")
+    name="$(awk '{print $1}' <<<"$line")"; ip="$(awk '{print $2}' <<<"$line")"; pw="$(awk '{print $3}' <<<"$line")"
+    WORKERS+=("$name"); W_IP+=("$ip"); W_PW+=("$pw")
   fi
 done < "$INV"
 
@@ -82,10 +88,29 @@ NFS_SERVER="${SET[NFS_SERVER]:-}"; NFS_PATH="${SET[NFS_PATH]:-/srv/nfs/k8s}"
 NFS_SC_NAME="${SET[NFS_SC_NAME]:-nfs-client}"
 [[ "$STORAGE" == nfs && -z "$NFS_SERVER" ]] && die "STORAGE=nfs — set NFS_SERVER (NFS server IP) in inventory.conf"
 
+# Fetch the admin kubeconfig to this machine at the end of install? (true|false)
+FETCH_KUBECONFIG="${SET[FETCH_KUBECONFIG]:-true}"
+
+# ---- optional auto-provisioning of the LB and NFS server (one-shot install) --
+# LB_HOST: host to run HAProxy on (fronts the masters for HA). If set, deploy.sh
+#          installs HAProxy there and uses LB_HOST:6443 as the endpoint.
+# NFS_SETUP=true: deploy.sh sets up the NFS server on NFS_SERVER first.
+# These hosts may use a different SSH user (e.g. a Debian proxy) — override with
+# LB_SSH_USER / NFS_SSH_USER.
+LB_HOST="${SET[LB_HOST]:-}";        LB_SSH_USER="${SET[LB_SSH_USER]:-$SSH_USER}"
+NFS_SETUP="${SET[NFS_SETUP]:-false}"; NFS_SSH_USER="${SET[NFS_SSH_USER]:-$SSH_USER}"
+NFS_CIDR="${SET[NFS_CIDR]:-}"
+# Optional passwords for the infra hosts' one-time bootstrap (node passwords come
+# from the 3rd inventory column). BOOTSTRAP=auto runs it only if any password is set.
+LB_PASSWORD="${SET[LB_PASSWORD]:-}"; NFS_PASSWORD="${SET[NFS_PASSWORD]:-}"
+BOOTSTRAP="${SET[BOOTSTRAP]:-auto}"    # auto | true | false
+
 # HA auto-detect
 if [[ ${#MASTERS[@]} -gt 1 ]]; then
   HA_MODE=multi
-  [[ -n "$CPE" ]] || die "You listed ${#MASTERS[@]} masters (HA) — set CONTROL_PLANE_ENDPOINT (VIP/LB) in inventory.conf"
+  # If no endpoint given but an LB host is, derive the endpoint from it.
+  [[ -z "$CPE" && -n "$LB_HOST" ]] && CPE="${LB_HOST}:6443"
+  [[ -n "$CPE" ]] || die "You listed ${#MASTERS[@]} masters (HA) — set CONTROL_PLANE_ENDPOINT, or set LB_HOST to auto-provision HAProxy, in inventory.conf"
 else
   HA_MODE=single
 fi
@@ -96,6 +121,67 @@ SSH_OPTS=( -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 )
 [[ -n "$SSH_KEY" ]] && SSH_OPTS+=( -i "$SSH_KEY" )
 rsh(){ ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" "${SSH_USER}@$1" "$2"; }
 push(){ scp "${SSH_OPTS[@]}" -P "$SSH_PORT" "$HERE/k8s.sh" "${SSH_USER}@$1:/tmp/k8s.sh" >/dev/null; }
+# generic variants that take an explicit user + file (for LB/NFS hosts)
+rsh_as(){ ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" "$1@$2" "$3"; }
+push_as(){ scp "${SSH_OPTS[@]}" -P "$SSH_PORT" "$3" "$1@$2:/tmp/$(basename "$3")" >/dev/null; }
+
+# Provision the LB (HAProxy) and/or NFS server if the inventory asks for it.
+provision_infra(){
+  if [[ "$STORAGE" == nfs && "$NFS_SETUP" == true ]]; then
+    [[ -f "$HERE/scripts/nfs-server-setup.sh" ]] || die "scripts/nfs-server-setup.sh not found"
+    step "0/4  provisioning NFS server on $NFS_SERVER (user $NFS_SSH_USER)"
+    push_as "$NFS_SSH_USER" "$NFS_SERVER" "$HERE/scripts/nfs-server-setup.sh"
+    rsh_as "$NFS_SSH_USER" "$NFS_SERVER" "sudo NFS_PATH='$NFS_PATH' ${NFS_CIDR:+NFS_CIDR='$NFS_CIDR'} bash /tmp/nfs-server-setup.sh"
+  fi
+  if [[ "$HA_MODE" == multi && -n "$LB_HOST" ]]; then
+    [[ -f "$HERE/scripts/lb-haproxy-setup.sh" ]] || die "scripts/lb-haproxy-setup.sh not found"
+    step "0/4  provisioning HAProxy LB on $LB_HOST (user $LB_SSH_USER)"
+    push_as "$LB_SSH_USER" "$LB_HOST" "$HERE/scripts/lb-haproxy-setup.sh"
+    rsh_as "$LB_SSH_USER" "$LB_HOST" "sudo bash /tmp/lb-haproxy-setup.sh ${M_IP[*]}"
+  fi
+}
+
+# ---- one-time SSH bootstrap (install key + passwordless sudo) ----------------
+# Uses passwords (node 3rd column, or LB_PASSWORD/NFS_PASSWORD) via sshpass, or
+# plink (PuTTY) as a fallback on Windows. After this, everything is key-based.
+PUBKEY_FILE="${SSH_KEY:-$HOME/.ssh/id_rsa}.pub"
+_PLINK=""; command -v plink >/dev/null 2>&1 && _PLINK="plink"; [[ -z "$_PLINK" && -x "/c/Program Files/PuTTY/plink.exe" ]] && _PLINK="/c/Program Files/PuTTY/plink.exe"
+
+# bootstrap_host <user> <ip> <password>
+bootstrap_host(){
+  local u="$1" ip="$2" pw="$3"
+  [[ -n "$pw" ]] || { warn "no password for $u@$ip — skipping (assuming key already works)"; return 0; }
+  [[ -f "$PUBKEY_FILE" ]] || die "public key not found: $PUBKEY_FILE (generate one: ssh-keygen -t rsa -b 4096)"
+  local pub; pub="$(cat "$PUBKEY_FILE")"
+  local remote="mkdir -p ~/.ssh && chmod 700 ~/.ssh && (grep -qF '$pub' ~/.ssh/authorized_keys 2>/dev/null || echo '$pub' >> ~/.ssh/authorized_keys) && chmod 600 ~/.ssh/authorized_keys && echo '$pw' | sudo -S bash -c 'echo \"$u ALL=(ALL) NOPASSWD:ALL\" >/etc/sudoers.d/90-$u-nopasswd && chmod 440 /etc/sudoers.d/90-$u-nopasswd' && echo BOOTSTRAP_OK"
+  if command -v sshpass >/dev/null 2>&1; then
+    sshpass -p "$pw" ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p "$SSH_PORT" "$u@$ip" "$remote" >/dev/null \
+      && log "bootstrapped $u@$ip" || die "bootstrap failed for $u@$ip (check password/connectivity)"
+  elif [[ -n "$_PLINK" ]]; then
+    echo y | "$_PLINK" -ssh -pw "$pw" "$u@$ip" "exit" >/dev/null 2>&1 || true   # cache host key
+    "$_PLINK" -ssh -batch -pw "$pw" "$u@$ip" "$remote" >/dev/null \
+      && log "bootstrapped $u@$ip" || die "bootstrap failed for $u@$ip (check password/connectivity)"
+  else
+    die "need 'sshpass' (Linux/mac/WSL) or PuTTY 'plink' (Windows) to bootstrap with passwords; or run ssh-copy-id manually and remove the password column"
+  fi
+}
+
+bootstrap_all(){
+  step "0/4  bootstrapping SSH keys + passwordless sudo"
+  local i
+  for i in "${!MASTERS[@]}"; do bootstrap_host "$SSH_USER" "${M_IP[$i]}" "${M_PW[$i]}"; done
+  for i in "${!WORKERS[@]}"; do bootstrap_host "$SSH_USER" "${W_IP[$i]}" "${W_PW[$i]}"; done
+  [[ "$STORAGE" == nfs && "$NFS_SETUP" == true && -n "$NFS_PASSWORD" ]] && bootstrap_host "$NFS_SSH_USER" "$NFS_SERVER" "$NFS_PASSWORD"
+  [[ "$HA_MODE" == multi && -n "$LB_HOST" && -n "$LB_PASSWORD" ]] && bootstrap_host "$LB_SSH_USER" "$LB_HOST" "$LB_PASSWORD"
+}
+
+# Should the auto-bootstrap run? true, or auto + at least one password present.
+want_bootstrap(){
+  [[ "$BOOTSTRAP" == false ]] && return 1
+  [[ "$BOOTSTRAP" == true ]] && return 0
+  local p; for p in "${M_PW[@]}" "${W_PW[@]}" "$LB_PASSWORD" "$NFS_PASSWORD"; do [[ -n "$p" ]] && return 0; done
+  return 1
+}
 
 # common env prefix passed into k8s.sh on the remote node
 envstr(){
@@ -116,7 +202,8 @@ print_plan(){
   else
     echo "  cni       : $CNI    storage: $STORAGE"
   fi
-  [[ $HA_MODE == multi ]] && echo "  endpoint  : $CPE"
+  [[ $HA_MODE == multi ]] && echo "  endpoint  : $CPE${LB_HOST:+  (HAProxy auto-provision on $LB_HOST)}"
+  [[ "$STORAGE" == nfs && "$NFS_SETUP" == true ]] && echo "  nfs-setup : yes (auto-provision on $NFS_SERVER)"
   echo "  ssh       : ${SSH_USER}@... :$SSH_PORT ${SSH_KEY:+key=$SSH_KEY}"
   printf "  masters   :"; for i in "${!MASTERS[@]}"; do printf " %s(%s)" "${MASTERS[$i]}" "${M_IP[$i]}"; done; echo
   printf "  workers   :"; for i in "${!WORKERS[@]}"; do printf " %s(%s)" "${WORKERS[$i]}" "${W_IP[$i]}"; done; echo
@@ -137,6 +224,9 @@ cmd_check(){
 cmd_install(){
   print_plan
   echo; read -rp "Proceed with install? [y/N] " a; [[ "$a" =~ ^[Yy]$ ]] || die "aborted"
+
+  want_bootstrap && bootstrap_all
+  provision_infra
 
   local M0="${M_IP[0]}"
   step "1/4  init primary master  ${MASTERS[0]} ($M0)"
@@ -171,7 +261,27 @@ cmd_install(){
   fi
 
   step "DONE"; rsh "$M0" "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide" || true
-  log "kubeconfig on primary master: /etc/kubernetes/admin.conf  (scp it to your laptop for kubectl)"
+  if [[ "$FETCH_KUBECONFIG" == true ]]; then
+    fetch_kubeconfig
+  else
+    log "FETCH_KUBECONFIG=false — skipping. Get it later with: ./deploy.sh kubeconfig"
+  fi
+}
+
+# Pull admin.conf from the primary master to THIS machine so kubectl works
+# locally right away. The server field already points at the right address
+# (the control-plane endpoint for HA, or the master's IP for single-master).
+fetch_kubeconfig(){
+  local M0="${M_IP[0]}" out="$HERE/kubeconfig"
+  step "fetching kubeconfig -> $out"
+  if rsh "$M0" "sudo cat /etc/kubernetes/admin.conf" >"$out.tmp" 2>/dev/null && [[ -s "$out.tmp" ]]; then
+    mv -f "$out.tmp" "$out"; chmod 600 "$out"
+    log "kubeconfig saved: $out"
+    log "use it with:   export KUBECONFIG=\"$out\"   &&   kubectl get nodes"
+    command -v kubectl >/dev/null && { log "quick check:"; KUBECONFIG="$out" kubectl get nodes 2>/dev/null || warn "kubectl couldn't reach the API from here (check routing/firewall to the endpoint)"; }
+  else
+    rm -f "$out.tmp"; warn "could not fetch kubeconfig automatically; on the master it is at /etc/kubernetes/admin.conf"
+  fi
 }
 
 cmd_storage(){ push "${M_IP[0]}"; rsh "${M_IP[0]}" "sudo $(storage_envstr) bash /tmp/k8s.sh storage"; }
@@ -205,10 +315,13 @@ cmd_reset(){
 }
 
 case "$ACTION" in
-  check)   cmd_check ;;
-  install) cmd_install ;;
-  storage) cmd_storage ;;
-  upgrade) shift; cmd_upgrade "$@" ;;
-  reset)   cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | install | storage | upgrade <ver> | reset)";;
+  check)      cmd_check ;;
+  install)    cmd_install ;;
+  bootstrap)  print_plan; bootstrap_all ;;
+  provision)  print_plan; provision_infra ;;
+  storage)    cmd_storage ;;
+  kubeconfig) fetch_kubeconfig ;;
+  upgrade)    shift; cmd_upgrade "$@" ;;
+  reset)      cmd_reset ;;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | storage | kubeconfig | upgrade <ver> | reset)";;
 esac

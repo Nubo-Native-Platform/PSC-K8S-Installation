@@ -102,15 +102,51 @@ subcommands on the right nodes over SSH, in the right order.
 ## Requirements
 
 **Nodes (each server):**
-- Ubuntu 22.04 / 24.04, or RHEL / Rocky / AlmaLinux 9 (apt or dnf).
+- A Linux distro using `apt` or `dnf` (see the OS support box below).
 - 2 CPU / 2 GB RAM minimum per node (more for real workloads).
 - A user with `sudo`, `curl` available, and network access to each other.
 - Unique hostname per node; time in sync (NTP).
 
+### OS support
+
+| OS | Package manager | Status |
+|----|-----------------|--------|
+| **Ubuntu 26.04 LTS** | apt | **Tested** — full HA + NFS build validated on a live 3-master + 5-worker cluster |
+| Ubuntu 22.04 / 24.04 LTS | apt | Not tested — expected to work (same apt path) |
+| Debian 12 / 13 | apt | Not tested — expected to work (same apt path) |
+| RHEL / Rocky / AlmaLinux 9 | dnf | Not tested — expected to work (dnf path present) |
+
+> **Only Ubuntu 26.04 has been verified end-to-end.** The other rows use the
+> same apt/dnf logic and should work, but haven't been run here — treat them as
+> best-effort until validated. Reports/PRs confirming other distros are welcome.
+
 **For the orchestrated setup, also on your laptop:**
 - `bash`, `ssh`, `scp` (Linux, macOS, WSL, or Git Bash — **not** native
   PowerShell).
-- SSH access (key recommended) to every node with password-less `sudo`.
+- SSH access to every node with password-less `sudo`. Either set up keys
+  yourself (`ssh-copy-id`), or let `deploy.sh` bootstrap it from passwords in the
+  inventory (see [SSH bootstrap](#ssh-bootstrap-fully-automated) below) — that
+  needs `sshpass` (Linux/mac/WSL) or PuTTY `plink` (Windows).
+
+### SSH bootstrap (fully automated)
+
+To make the whole thing a single command with nothing set up by hand, put a
+password as the optional **3rd column** on each node line, and
+`LB_PASSWORD`/`NFS_PASSWORD` in `[settings]`:
+```ini
+[masters]
+master1  10.0.0.11  s3cret-pw
+[workers]
+worker1  10.0.0.21  s3cret-pw
+```
+`deploy.sh` installs your SSH public key and passwordless sudo on every host
+first (`BOOTSTRAP=auto` runs it whenever any password is present), then provisions
+and builds. Run just this phase with `./deploy.sh bootstrap`.
+
+> **Never commit passwords.** Keep them in a private inventory — `*.local.conf`
+> and `secrets.conf` are git-ignored. Copy the example, add passwords to the copy,
+> and deploy with `-i your.local.conf`. Prefer key-based auth for anything
+> long-lived; the password column is only used for this one-time bootstrap.
 
 ---
 
@@ -153,14 +189,43 @@ worker2  10.0.0.22
 ./deploy.sh                # build the ENTIRE cluster + storage
 ```
 
+**One-shot, including the LB and NFS server.** For HA you need a control-plane
+load balancer, and for NFS storage you need an NFS server. Rather than preparing
+those by hand, declare them in the inventory and `deploy.sh` sets them up first,
+then builds the cluster — all from the single `./deploy.sh` command:
+```ini
+LB_HOST=192.168.18.51      # auto-install HAProxy here; endpoint = LB_HOST:6443
+LB_SSH_USER=debian         # if the LB host uses a different SSH user
+STORAGE=nfs
+NFS_SERVER=192.168.18.69
+NFS_SETUP=true             # auto-install the NFS server on NFS_SERVER
+NFS_CIDR=192.168.18.0/24
+```
+(You can also run just the infra step with `./deploy.sh provision`.) See the
+ready-made [`prod1-cluster.conf`](prod1-cluster.conf) for a full 3-master +
+5-worker + NFS example.
+
 `deploy.sh` will: prep every node → `kubeadm init` the first master → install
 the CNI → collect join tokens → join the other masters and all workers →
-install storage (Longhorn or NFS) → print `kubectl get nodes`.
+install storage (Longhorn or NFS) → print `kubectl get nodes` → **fetch the
+admin kubeconfig to `./kubeconfig`** on your machine (unless
+`FETCH_KUBECONFIG=false`).
+
+Use it right away:
+```bash
+export KUBECONFIG="$PWD/kubeconfig"
+kubectl get nodes
+```
+Re-fetch it any time with `./deploy.sh kubeconfig`. (It contains cluster-admin
+credentials and is git-ignored — keep it safe.)
 
 ### 3. Other actions
 ```bash
 ./deploy.sh -i staging.conf     # use a different inventory file
+./deploy.sh bootstrap           # install SSH keys + passwordless sudo (from passwords)
+./deploy.sh provision           # set up the LB and/or NFS server only
 ./deploy.sh storage             # (re)install storage only
+./deploy.sh kubeconfig          # fetch admin kubeconfig to ./kubeconfig
 ./deploy.sh upgrade 1.37.0      # rolling upgrade the whole cluster
 ./deploy.sh reset               # tear the cluster down
 ```
@@ -235,6 +300,14 @@ list in `inventory.conf`:
 In the one-liner setup, choose it explicitly with `HA_MODE=single|multi`.
 
 > HA needs an **odd** number of masters (1, 3, 5) so etcd can keep quorum.
+
+**Masters run control-plane components only.** kubeadm taints every control-plane
+node with `node-role.kubernetes.io/control-plane:NoSchedule`, so the scheduler
+keeps your application pods off the masters — they land on the workers. Only
+required system pods that tolerate the taint (etcd, API server, controller
+manager, scheduler, kube-proxy, and the CNI DaemonSet) run on masters. Don't add
+a blanket toleration for that taint to app workloads if you want to preserve
+this separation.
 > **3 masters is the typical HA size** and is what the bundled
 > [`prod1-cluster.conf`](prod1-cluster.conf) example uses (3 masters + 5 workers).
 
@@ -411,6 +484,14 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `NFS_SERVER` | *(empty)* | NFS server IP/host — **required when `STORAGE=nfs`** |
 | `NFS_PATH` | `/srv/nfs/k8s` | exported directory on the NFS server |
 | `NFS_SC_NAME` | `nfs-client` | StorageClass name to create (NFS) |
+| `NFS_SETUP` | `false` | `true` = `deploy.sh` sets up the NFS server on `NFS_SERVER` automatically |
+| `NFS_CIDR` | auto | network allowed to mount the NFS export (e.g. `192.168.18.0/24`) |
+| `NFS_SSH_USER` | `SSH_USER` | SSH user for the NFS host (if different) |
+| `LB_HOST` | *(empty)* | host to auto-provision HAProxy on for HA; endpoint becomes `LB_HOST:6443` |
+| `LB_SSH_USER` | `SSH_USER` | SSH user for the LB host (e.g. `debian` on a Debian proxy) |
+| `BOOTSTRAP` | `auto` | `auto`=bootstrap SSH keys+sudo if any password is set; `true`/`false` to force |
+| `LB_PASSWORD` / `NFS_PASSWORD` | *(empty)* | bootstrap passwords for the LB / NFS hosts (keep in a private inventory) |
+| `FETCH_KUBECONFIG` | `true` | after install, copy the admin kubeconfig to `./kubeconfig` (`false` = don't) |
 | `SSH_USER` / `SSH_KEY` / `SSH_PORT` | `ubuntu` / `~/.ssh/id_rsa` / `22` | SSH access (orchestrated only) |
 
 > **Back-compat:** the old `LONGHORN=true/false` key still works — if `STORAGE`
