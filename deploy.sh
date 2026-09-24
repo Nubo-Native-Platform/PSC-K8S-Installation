@@ -9,6 +9,7 @@
 #    ./deploy.sh bootstrap       # only install SSH keys + passwordless sudo
 #    ./deploy.sh provision       # only set up the LB and/or NFS server
 #    ./deploy.sh knative         # install Knative (Serving/Eventing) on Istio
+#    ./deploy.sh argocd          # install Argo CD (GitOps)
 #    ./deploy.sh add-worker w6 10.0.0.26 [pw]   # join ONE new worker later
 #    ./deploy.sh remove-worker prod1-...-w6 [ip] # drain + remove a worker
 #    ./deploy.sh storage         # (re)install storage (Longhorn or NFS) only
@@ -118,6 +119,11 @@ ISTIO_VERSION="${SET[ISTIO_VERSION]:-1.31.1}"
 KNATIVE_VERSION="${SET[KNATIVE_VERSION]:-knative-v1.23.0}"
 KNATIVE_INGRESS_TYPE="${SET[KNATIVE_INGRESS_TYPE]:-NodePort}"
 KNATIVE_DOMAIN_IP="${SET[KNATIVE_DOMAIN_IP]:-${M_IP[0]}}"
+
+# ---- Argo CD (optional) ----------------------------------------------------
+ARGOCD="${SET[ARGOCD]:-false}"                   # true = install during ./deploy.sh
+ARGOCD_VERSION="${SET[ARGOCD_VERSION]:-v3.5.3}"
+ARGOCD_INGRESS_TYPE="${SET[ARGOCD_INGRESS_TYPE]:-NodePort}"
 
 # HA auto-detect
 if [[ ${#MASTERS[@]} -gt 1 ]]; then
@@ -276,6 +282,7 @@ cmd_install(){
 
   step "DONE"; rsh "$M0" "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide" || true
   [[ "$KNATIVE" == true ]] && cmd_knative
+  [[ "$ARGOCD" == true ]] && cmd_argocd
 
   if [[ "$FETCH_KUBECONFIG" == true ]]; then
     fetch_kubeconfig
@@ -313,6 +320,15 @@ cmd_knative(){
   step "installing Knative + Istio (via $M0)"
   push_as "$SSH_USER" "$M0" "$HERE/scripts/06-knative-istio.sh"
   rsh "$M0" "sudo $(knative_envstr) bash /tmp/06-knative-istio.sh"
+}
+
+# Install Argo CD (GitOps CD), via the first master.
+cmd_argocd(){
+  [[ -f "$HERE/scripts/07-argocd.sh" ]] || die "scripts/07-argocd.sh not found"
+  local M0="${M_IP[0]}"
+  step "installing Argo CD (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/07-argocd.sh"
+  rsh "$M0" "sudo ARGOCD_VERSION='$ARGOCD_VERSION' ARGOCD_INGRESS_TYPE='$ARGOCD_INGRESS_TYPE' bash /tmp/07-argocd.sh"
 }
 
 # Add a single worker to an existing cluster (does NOT touch existing nodes).
@@ -393,8 +409,9 @@ case "$ACTION" in
   remove-worker) shift; cmd_remove_worker "$@" ;;
   storage)    cmd_storage ;;
   knative)    cmd_knative ;;
+  argocd)     cmd_argocd ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | knative | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | knative | argocd | kubeconfig | upgrade <ver> | reset)";;
 esac

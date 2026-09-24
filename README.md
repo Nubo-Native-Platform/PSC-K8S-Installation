@@ -31,6 +31,7 @@ Both use the **same engine** (`k8s.sh`), so you can mix them.
 - [Storage (Longhorn or NFS)](#storage-longhorn-or-nfs)
 - [Load balancer for HA (control-plane endpoint)](#load-balancer-for-ha-control-plane-endpoint)
 - [Knative (Serving + Eventing) on Istio](#knative-serving--eventing-on-istio)
+- [Argo CD (GitOps)](#argo-cd-gitops)
 - [Upgrading](#upgrading)
 - [Tear down / reset](#tear-down--reset)
 - [Configuration reference](#configuration-reference)
@@ -230,6 +231,7 @@ credentials and is git-ignored — keep it safe.)
 ./deploy.sh remove-worker NODE  # drain + remove a worker from the cluster
 ./deploy.sh storage             # (re)install storage only
 ./deploy.sh knative             # install Knative (Serving/Eventing) on Istio
+./deploy.sh argocd              # install Argo CD (GitOps)
 ./deploy.sh kubeconfig          # fetch admin kubeconfig to ./kubeconfig
 ./deploy.sh upgrade 1.37.0      # rolling upgrade the whole cluster
 ./deploy.sh reset               # tear the cluster down
@@ -526,6 +528,29 @@ an injected Knative pod runs `user-container` + `queue-proxy` with `istio-init` 
 
 ---
 
+## Argo CD (GitOps)
+
+Install [Argo CD](https://argo-cd.readthedocs.io) for GitOps-style continuous
+delivery (declaratively sync apps from Git):
+```bash
+./deploy.sh argocd             # or set ARGOCD=true in the inventory
+```
+It installs Argo CD (pinned `ARGOCD_VERSION`) into the `argocd` namespace using
+**server-side apply** (its CRDs exceed the client-side apply size limit), exposes
+the server via `ARGOCD_INGRESS_TYPE` (NodePort by default), waits for it to be
+ready, and prints the initial `admin` password.
+
+Access it:
+```bash
+NP=$(kubectl -n argocd get svc argocd-server -o jsonpath='{.spec.ports[?(@.port==443)].nodePort}')
+# open https://<any-node-ip>:$NP  (self-signed TLS), user: admin
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
+```
+Change the admin password and delete `argocd-initial-admin-secret` after first
+login.
+
+---
+
 ## Upgrading
 
 Kubernetes only supports moving **one minor at a time** (1.36 → 1.37, not
@@ -577,6 +602,9 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `ISTIO_VERSION` / `KNATIVE_VERSION` | `1.31.1` / `knative-v1.23.0` | pinned versions |
 | `KNATIVE_INGRESS_TYPE` | `NodePort` | `NodePort` (no LB needed) or `LoadBalancer` |
 | `KNATIVE_DOMAIN_IP` | first master | node IP for Magic DNS (`<ip>.sslip.io`) |
+| `ARGOCD` | `false` | `true` = install Argo CD (GitOps) during `./deploy.sh` |
+| `ARGOCD_VERSION` | `v3.5.3` | pinned Argo CD release |
+| `ARGOCD_INGRESS_TYPE` | `NodePort` | `NodePort`, `LoadBalancer`, or `ClusterIP` for the Argo CD server |
 | `APISERVER_ADVERTISE_ADDRESS` | auto | which node IP the API server advertises |
 | `STORAGE` | `longhorn` | storage backend: `longhorn`, `nfs`, or `none` |
 | `LONGHORN_VERSION` | `v1.10.0` | Longhorn version (when `STORAGE=longhorn`) |
@@ -614,6 +642,7 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `scripts/nfs-server-setup.sh` | set up the external NFS server (run on the file server) |
 | `scripts/lb-haproxy-setup.sh` | stand up an HAProxy control-plane LB for HA |
 | `scripts/06-knative-istio.sh` | install Knative (Serving/Eventing) on Istio + sidecar injection |
+| `scripts/07-argocd.sh` | install Argo CD (GitOps continuous delivery) |
 | `scripts/05-upgrade.sh` | modular: per-node upgrade |
 | `scripts/list-versions.sh` | list installable Kubernetes versions |
 | `scripts/lib.sh` / `config/cluster.env` | shared helpers / config for the modular scripts |
