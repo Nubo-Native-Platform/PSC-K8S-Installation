@@ -102,10 +102,23 @@ subcommands on the right nodes over SSH, in the right order.
 ## Requirements
 
 **Nodes (each server):**
-- Ubuntu 22.04 / 24.04, or RHEL / Rocky / AlmaLinux 9 (apt or dnf).
+- A Linux distro using `apt` or `dnf` (see the OS support box below).
 - 2 CPU / 2 GB RAM minimum per node (more for real workloads).
 - A user with `sudo`, `curl` available, and network access to each other.
 - Unique hostname per node; time in sync (NTP).
+
+### OS support
+
+| OS | Package manager | Status |
+|----|-----------------|--------|
+| **Ubuntu 26.04 LTS** | apt | **Tested** — full HA + NFS build validated on a live 3-master + 5-worker cluster |
+| Ubuntu 22.04 / 24.04 LTS | apt | Not tested — expected to work (same apt path) |
+| Debian 12 / 13 | apt | Not tested — expected to work (same apt path) |
+| RHEL / Rocky / AlmaLinux 9 | dnf | Not tested — expected to work (dnf path present) |
+
+> **Only Ubuntu 26.04 has been verified end-to-end.** The other rows use the
+> same apt/dnf logic and should work, but haven't been run here — treat them as
+> best-effort until validated. Reports/PRs confirming other distros are welcome.
 
 **For the orchestrated setup, also on your laptop:**
 - `bash`, `ssh`, `scp` (Linux, macOS, WSL, or Git Bash — **not** native
