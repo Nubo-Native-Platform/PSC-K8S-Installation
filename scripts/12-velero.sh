@@ -15,7 +15,9 @@
 #   VELERO_VERSION        default v1.16.1
 #   VELERO_PLUGIN_AWS     default v1.12.1
 #   VELERO_SCHEDULE       default "0 3 * * *" (daily 03:00); "" to skip the schedule
-#   VELERO_TTL            default 720h0m0s (30d backup retention in S3)
+#   VELERO_TTL            default 360h0m0s (15d backup retention in S3)
+#   VELERO_EXCLUDE_NAMESPACES  default "monitoring" (skip large/ephemeral data to
+#                              save S3 cost; comma-separated)
 set -euo pipefail
 VELERO_VERSION="${VELERO_VERSION:-v1.16.1}"
 VELERO_PLUGIN_AWS="${VELERO_PLUGIN_AWS:-v1.12.1}"
@@ -24,7 +26,8 @@ AWS_REGION="${AWS_REGION:?set AWS_REGION}"
 AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID}"
 AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}"
 VELERO_SCHEDULE="${VELERO_SCHEDULE:-0 3 * * *}"
-VELERO_TTL="${VELERO_TTL:-720h0m0s}"
+VELERO_TTL="${VELERO_TTL:-360h0m0s}"
+VELERO_EXCLUDE_NAMESPACES="${VELERO_EXCLUDE_NAMESPACES:-monitoring}"
 export KUBECONFIG="${KUBECONFIG:-/etc/kubernetes/admin.conf}"
 g='\033[0;32m'; y='\033[0;33m'; r='\033[0;31m'; n='\033[0m'
 log(){ echo -e "${g}[+]${n} $*"; }; warn(){ echo -e "${y}[!]${n} $*"; }; die(){ echo -e "${r}[x]${n} $*" >&2; exit 1; }
@@ -70,9 +73,11 @@ log "backup storage location status:"
 velero backup-location get 2>/dev/null || true
 
 if [[ -n "$VELERO_SCHEDULE" ]]; then
-  log "creating daily backup schedule (all namespaces, ttl ${VELERO_TTL})"
+  log "creating daily backup schedule (ttl ${VELERO_TTL}, excluding: ${VELERO_EXCLUDE_NAMESPACES:-none})"
+  velero schedule delete daily-all --confirm >/dev/null 2>&1 || true
+  EXC=(); [[ -n "$VELERO_EXCLUDE_NAMESPACES" ]] && EXC=(--exclude-namespaces "$VELERO_EXCLUDE_NAMESPACES")
   velero schedule create daily-all --schedule "${VELERO_SCHEDULE}" --ttl "${VELERO_TTL}" \
-    --default-volumes-to-fs-backup 2>/dev/null || warn "schedule may already exist"
+    --default-volumes-to-fs-backup "${EXC[@]}" 2>/dev/null || warn "could not create schedule"
 fi
 
 echo

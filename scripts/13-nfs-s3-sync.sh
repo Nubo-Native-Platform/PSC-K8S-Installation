@@ -31,6 +31,7 @@ AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}"
 NFS_SERVER="${NFS_SERVER:?set NFS_SERVER}"
 NFS_PATH="${NFS_PATH:-/srv/nfs/k8s}"
 NFS_S3_SCHEDULE="${NFS_S3_SCHEDULE:-30 3 * * *}"
+NFS_S3_STORAGE_CLASS="${NFS_S3_STORAGE_CLASS:-STANDARD}"   # STANDARD is cheapest for short (3d) retention
 NS="${NFS_S3_NAMESPACE:-nfs-provisioner}"
 export KUBECONFIG="${KUBECONFIG:-/etc/kubernetes/admin.conf}"
 g='\033[0;32m'; y='\033[0;33m'; r='\033[0;31m'; n='\033[0m'
@@ -77,7 +78,10 @@ spec:
                 # is not a failure for a best-effort file-level backup. Only a real
                 # error (exit 1) should fail the job.
                 - |
-                  aws s3 sync /export "s3://${NFS_S3_BUCKET}/${NFS_S3_PREFIX}/" --no-progress; rc=\$?
+                  # Skip the transient archived-* recovery copies (kept locally,
+                  # pruned to last 3) to save S3 cost; use the chosen storage class.
+                  aws s3 sync /export "s3://${NFS_S3_BUCKET}/${NFS_S3_PREFIX}/" --no-progress \
+                    --exclude "archived-*/*" --storage-class ${NFS_S3_STORAGE_CLASS}; rc=\$?
                   if [ "\$rc" = "0" ] || [ "\$rc" = "2" ]; then
                     echo "nfs->s3 sync done (rc=\$rc; rc=2 = some unreadable files skipped)"; exit 0
                   fi

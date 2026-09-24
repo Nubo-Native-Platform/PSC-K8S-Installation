@@ -131,7 +131,10 @@ PROMETHEUS_STORAGE_CLASS="${SET[PROMETHEUS_STORAGE_CLASS]:-}"
 VELERO="${SET[VELERO]:-false}"                 # Velero -> S3 (cluster + PV data)
 NFS_S3_SYNC="${SET[NFS_S3_SYNC]:-false}"       # raw NFS export -> S3 CronJob
 VELERO_BUCKET="${SET[VELERO_BUCKET]:-}"
+VELERO_TTL="${SET[VELERO_TTL]:-360h0m0s}"                       # 15 days
+VELERO_EXCLUDE_NAMESPACES="${SET[VELERO_EXCLUDE_NAMESPACES]:-monitoring}"
 NFS_S3_BUCKET="${SET[NFS_S3_BUCKET]:-}"; NFS_S3_PREFIX="${SET[NFS_S3_PREFIX]:-nfs-backup}"
+NFS_S3_STORAGE_CLASS="${SET[NFS_S3_STORAGE_CLASS]:-STANDARD}"
 AWS_REGION="${SET[AWS_REGION]:-}"
 AWS_ACCESS_KEY_ID="${SET[AWS_ACCESS_KEY_ID]:-}"; AWS_SECRET_ACCESS_KEY="${SET[AWS_SECRET_ACCESS_KEY]:-}"
 
@@ -379,7 +382,7 @@ cmd_velero(){
     || die "Velero needs VELERO_BUCKET, AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (put them in a private *.local.conf)"
   local M0="${M_IP[0]}"; step "installing Velero (via $M0)"
   push_as "$SSH_USER" "$M0" "$HERE/scripts/12-velero.sh"
-  rsh "$M0" "sudo VELERO_BUCKET='$VELERO_BUCKET' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' bash /tmp/12-velero.sh"
+  rsh "$M0" "sudo VELERO_BUCKET='$VELERO_BUCKET' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' VELERO_TTL='$VELERO_TTL' VELERO_EXCLUDE_NAMESPACES='$VELERO_EXCLUDE_NAMESPACES' bash /tmp/12-velero.sh"
 }
 
 # Install the raw NFS-export -> S3 sync CronJob, via the first master.
@@ -389,7 +392,7 @@ cmd_nfs_s3(){
     || die "NFS->S3 needs NFS_S3_BUCKET, AWS_REGION, AWS creds, and NFS_SERVER"
   local M0="${M_IP[0]}"; step "installing NFS->S3 sync (via $M0)"
   push_as "$SSH_USER" "$M0" "$HERE/scripts/13-nfs-s3-sync.sh"
-  rsh "$M0" "sudo NFS_S3_BUCKET='$NFS_S3_BUCKET' NFS_S3_PREFIX='$NFS_S3_PREFIX' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' bash /tmp/13-nfs-s3-sync.sh"
+  rsh "$M0" "sudo NFS_S3_BUCKET='$NFS_S3_BUCKET' NFS_S3_PREFIX='$NFS_S3_PREFIX' NFS_S3_STORAGE_CLASS='$NFS_S3_STORAGE_CLASS' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' bash /tmp/13-nfs-s3-sync.sh"
 }
 
 # Install Knative (Serving + optional Eventing) on Istio, via the first master.

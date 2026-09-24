@@ -639,8 +639,21 @@ app's private 0600 data, e.g. OpenBao's raft files) — the job still succeeds. 
 those, rely on Velero or the app's own snapshot (OpenBao: `bao operator raft
 snapshot save`).
 
-> Inventory keys: `VELERO`, `VELERO_BUCKET`, `NFS_S3_SYNC`, `NFS_S3_BUCKET`,
-> `NFS_S3_PREFIX`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
+> Inventory keys: `VELERO`, `VELERO_BUCKET`, `VELERO_TTL` (default 15d),
+> `VELERO_EXCLUDE_NAMESPACES` (default `monitoring`), `NFS_S3_SYNC`,
+> `NFS_S3_BUCKET`, `NFS_S3_PREFIX`, `NFS_S3_STORAGE_CLASS`, `AWS_REGION`,
+> `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`.
+
+**Retention & cost:** Velero backups expire after **15 days** (Velero deletes
+them); the `nfs-backup/` prefix expires after **3 days** via an S3 lifecycle rule.
+`monitoring` is excluded from Velero and `archived-*` from the NFS sync to cut
+size. Objects use `STANDARD` (cheapest for short retention — IA/Glacier minimum
+durations would cost more). The bucket has default AES256 encryption and public
+access blocked.
+
+**Full restore procedures: [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)** —
+Velero (full / per-namespace / selective), raw NFS→S3 file recovery, and OpenBao
+raft snapshot restore.
 
 ---
 
