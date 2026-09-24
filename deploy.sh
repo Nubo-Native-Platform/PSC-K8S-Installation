@@ -8,6 +8,8 @@
 #    ./deploy.sh check           # test SSH + sudo to every node
 #    ./deploy.sh bootstrap       # only install SSH keys + passwordless sudo
 #    ./deploy.sh provision       # only set up the LB and/or NFS server
+#    ./deploy.sh add-worker w6 10.0.0.26 [pw]   # join ONE new worker later
+#    ./deploy.sh remove-worker prod1-...-w6 [ip] # drain + remove a worker
 #    ./deploy.sh storage         # (re)install storage (Longhorn or NFS) only
 #    ./deploy.sh kubeconfig      # fetch admin kubeconfig to ./kubeconfig
 #    ./deploy.sh upgrade 1.37.0  # rolling upgrade of the whole cluster
@@ -286,6 +288,47 @@ fetch_kubeconfig(){
 
 cmd_storage(){ push "${M_IP[0]}"; rsh "${M_IP[0]}" "sudo $(storage_envstr) bash /tmp/k8s.sh storage"; }
 
+# Add a single worker to an existing cluster (does NOT touch existing nodes).
+#   ./deploy.sh add-worker <name> <ip> [password]
+cmd_add_worker(){
+  local name="${1:?usage: deploy.sh add-worker <name> <ip> [password]}"
+  local ip="${2:?usage: deploy.sh add-worker <name> <ip> [password]}"
+  local pw="${3:-}"
+  local M0="${M_IP[0]}"
+  [[ -n "$pw" ]] && bootstrap_host "$SSH_USER" "$ip" "$pw"
+  step "adding worker $name ($ip)"
+  push "$M0"
+  local WJOIN; WJOIN="$(rsh "$M0" "sudo bash /tmp/k8s.sh token" | sed -n 's/^JOIN=//p' | tr -d '\"')"
+  [[ -n "$WJOIN" ]] || die "could not get a join token from $M0"
+  push "$ip"
+  rsh "$ip" "sudo $(envstr) JOIN='$WJOIN' bash /tmp/k8s.sh join"
+  log "worker $name joined. Verify from a master:  kubectl get nodes -o wide"
+}
+
+# Remove a worker from the cluster: drain -> delete -> (optional) reset the node.
+#   ./deploy.sh remove-worker <node-name> [ip]
+# <node-name> is the Kubernetes node name (from 'kubectl get nodes', i.e. the
+# host's hostname). Pass [ip] to also run 'kubeadm reset' on the node itself.
+cmd_remove_worker(){
+  local node="${1:?usage: deploy.sh remove-worker <node-name> [ip]}"
+  local ip="${2:-}"
+  local M0="${M_IP[0]}"
+  step "removing worker $node"
+  warn "This evicts all workloads from $node and removes it from the cluster."
+  read -rp "Type the node name '$node' to confirm: " a; [[ "$a" == "$node" ]] || die "aborted"
+  local K="sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl"
+  rsh "$M0" "$K cordon $node" || true
+  rsh "$M0" "$K drain $node --ignore-daemonsets --delete-emptydir-data --force --timeout=120s" || warn "drain reported issues (continuing)"
+  rsh "$M0" "$K delete node $node" || die "failed to delete node $node from the cluster"
+  if [[ -n "$ip" ]]; then
+    log "resetting kubeadm on $ip"
+    rsh "$ip" "sudo kubeadm reset -f; sudo rm -rf /etc/cni/net.d ~/.kube" || warn "reset on $ip reported issues"
+  else
+    warn "node deleted from cluster. To clean the machine itself: ssh to it and run 'sudo kubeadm reset -f'"
+  fi
+  log "worker $node removed. Verify:  kubectl get nodes"
+}
+
 cmd_upgrade(){
   local T="${1:?usage: deploy.sh upgrade <version e.g 1.37.0>}"
   print_plan; echo; read -rp "Upgrade whole cluster to v$T (one minor only)? [y/N] " a; [[ "$a" =~ ^[Yy]$ ]] || die "aborted"
@@ -319,9 +362,11 @@ case "$ACTION" in
   install)    cmd_install ;;
   bootstrap)  print_plan; bootstrap_all ;;
   provision)  print_plan; provision_infra ;;
+  add-worker)    shift; cmd_add_worker "$@" ;;
+  remove-worker) shift; cmd_remove_worker "$@" ;;
   storage)    cmd_storage ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | storage | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | kubeconfig | upgrade <ver> | reset)";;
 esac

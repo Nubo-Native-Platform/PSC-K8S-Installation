@@ -224,6 +224,8 @@ credentials and is git-ignored — keep it safe.)
 ./deploy.sh -i staging.conf     # use a different inventory file
 ./deploy.sh bootstrap           # install SSH keys + passwordless sudo (from passwords)
 ./deploy.sh provision           # set up the LB and/or NFS server only
+./deploy.sh add-worker w6 IP    # join ONE new worker to the existing cluster
+./deploy.sh remove-worker NODE  # drain + remove a worker from the cluster
 ./deploy.sh storage             # (re)install storage only
 ./deploy.sh kubeconfig          # fetch admin kubeconfig to ./kubeconfig
 ./deploy.sh upgrade 1.37.0      # rolling upgrade the whole cluster
@@ -342,10 +344,20 @@ failure. (Cloud users: use a managed L4 load balancer instead.)
 
 ## Adding worker nodes later
 
-**Orchestrated:** add the node under `[workers]` in `inventory.conf`, then:
+You can grow the cluster any time. Do **not** re-run the full `./deploy.sh` to add
+a node — that re-runs `kubeadm init` on the first master. Use the targeted
+`add-worker` action, which only touches the new node.
+
+**Orchestrated (recommended):** from your machine, one command per new node:
 ```bash
-./deploy.sh              # existing nodes are already joined; new ones get joined
+./deploy.sh add-worker worker6 10.0.0.26            # key-based access already set up
+./deploy.sh add-worker worker6 10.0.0.26 's3cret'   # or bootstrap it with a password
 ```
+It mints a fresh join token on the first master, preps the new node (containerd,
+kube tools, NFS client), and joins it as a worker. Optionally also add the node
+under `[workers]` in your inventory to keep the file accurate for future
+upgrades. Extra nodes automatically get NFS storage (they mount the same NFS
+StorageClass) — no storage step needed.
 
 **Manual / one-liner:** join tokens expire after ~24h, so mint a fresh one on a
 master:
@@ -356,6 +368,26 @@ Then on the new worker:
 ```bash
 curl -sfL https://YOUR_HOST/k8s.sh | sudo JOIN="kubeadm join ..." bash -s -- join
 ```
+
+> Adding an extra **control-plane** node (master) is also possible but needs the
+> upload-certs certificate key and your LB to include it; that's an advanced,
+> less-common operation — open an issue if you need a scripted path for it.
+
+### Removing a worker
+
+To retire a node safely (evict its pods first, then remove it):
+```bash
+./deploy.sh remove-worker <node-name>          # drain + delete from the cluster
+./deploy.sh remove-worker <node-name> 10.0.0.26 # also 'kubeadm reset' the machine
+```
+`<node-name>` is the Kubernetes node name shown by `kubectl get nodes` (the
+host's hostname, e.g. `prod1-k8s-worker6`). It cordons and drains the node
+(`--ignore-daemonsets --delete-emptydir-data`), deletes it from the API, and —
+if you pass the IP — resets kubeadm on the machine so it's clean for reuse. You
+are asked to confirm by typing the node name.
+
+> Any PVCs whose pods were on that node re-attach elsewhere automatically because
+> the data lives on the NFS server, not the node.
 
 ---
 
