@@ -32,6 +32,7 @@ Both use the **same engine** (`k8s.sh`), so you can mix them.
 - [Load balancer for HA (control-plane endpoint)](#load-balancer-for-ha-control-plane-endpoint)
 - [Knative (Serving + Eventing) on Istio](#knative-serving--eventing-on-istio)
 - [Argo CD (GitOps)](#argo-cd-gitops)
+- [OpenBao (secret manager)](#openbao-secret-manager)
 - [Upgrading](#upgrading)
 - [Tear down / reset](#tear-down--reset)
 - [Configuration reference](#configuration-reference)
@@ -232,6 +233,7 @@ credentials and is git-ignored — keep it safe.)
 ./deploy.sh storage             # (re)install storage only
 ./deploy.sh knative             # install Knative (Serving/Eventing) on Istio
 ./deploy.sh argocd              # install Argo CD (GitOps)
+./deploy.sh openbao             # install OpenBao (HA Raft secret manager)
 ./deploy.sh kubeconfig          # fetch admin kubeconfig to ./kubeconfig
 ./deploy.sh upgrade 1.37.0      # rolling upgrade the whole cluster
 ./deploy.sh reset               # tear the cluster down
@@ -551,6 +553,40 @@ login.
 
 ---
 
+## OpenBao (secret manager)
+
+[OpenBao](https://openbao.org) is the open-source (Linux Foundation) fork of
+Vault. This installs it as an **HA cluster with Integrated Storage (Raft, 3
+replicas)** and initializes + unseals it:
+```bash
+./deploy.sh openbao            # or set OPENBAO=true in the inventory
+```
+It installs Helm if needed, deploys the pinned OpenBao chart, waits for the
+pods, then **initializes** `openbao-0`, **unseals** it, and **joins + unseals**
+the other replicas. The unseal keys and root token are written to
+`/root/openbao-init.json` on the first master (root-only).
+
+Use it:
+```bash
+kubectl -n openbao port-forward svc/openbao 8200:8200 &
+export BAO_ADDR=http://127.0.0.1:8200
+bao login <root-token>        # from /root/openbao-init.json
+bao secrets enable -path=secret kv-v2
+bao kv put secret/demo hello=world && bao kv get secret/demo
+```
+
+> **Security:** move `openbao-init.json` out of the node into real secret storage
+> and delete it; losing the keys loses access, leaking them is full compromise.
+> There is **no auto-unseal** on bare metal (no cloud KMS), so after a pod/node
+> restart OpenBao comes up **sealed** — re-run `./deploy.sh openbao` (or unseal
+> manually with 3 keys) to unseal it.
+>
+> **Storage:** Raft uses BoltDB (mmap + file locks), which is **not recommended
+> on NFS**. For production set `OPENBAO_STORAGE_CLASS` to local/block storage.
+> The default (NFS) works for testing.
+
+---
+
 ## Upgrading
 
 Kubernetes only supports moving **one minor at a time** (1.36 → 1.37, not
@@ -605,6 +641,10 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `ARGOCD` | `false` | `true` = install Argo CD (GitOps) during `./deploy.sh` |
 | `ARGOCD_VERSION` | `v3.5.3` | pinned Argo CD release |
 | `ARGOCD_INGRESS_TYPE` | `NodePort` | `NodePort`, `LoadBalancer`, or `ClusterIP` for the Argo CD server |
+| `OPENBAO` | `false` | `true` = install OpenBao (HA Raft secret manager) during `./deploy.sh` |
+| `OPENBAO_REPLICAS` | `3` | Raft voters (3 or 5) |
+| `OPENBAO_INGRESS_TYPE` | `ClusterIP` | `ClusterIP` or `NodePort` for the OpenBao service |
+| `OPENBAO_STORAGE_CLASS` | *(default SC)* | StorageClass for Raft data (use local/block for production) |
 | `APISERVER_ADVERTISE_ADDRESS` | auto | which node IP the API server advertises |
 | `STORAGE` | `longhorn` | storage backend: `longhorn`, `nfs`, or `none` |
 | `LONGHORN_VERSION` | `v1.10.0` | Longhorn version (when `STORAGE=longhorn`) |
@@ -643,6 +683,7 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `scripts/lb-haproxy-setup.sh` | stand up an HAProxy control-plane LB for HA |
 | `scripts/06-knative-istio.sh` | install Knative (Serving/Eventing) on Istio + sidecar injection |
 | `scripts/07-argocd.sh` | install Argo CD (GitOps continuous delivery) |
+| `scripts/08-openbao.sh` | install OpenBao (HA Raft secret manager) + init/unseal |
 | `scripts/05-upgrade.sh` | modular: per-node upgrade |
 | `scripts/list-versions.sh` | list installable Kubernetes versions |
 | `scripts/lib.sh` / `config/cluster.env` | shared helpers / config for the modular scripts |
