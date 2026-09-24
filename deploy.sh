@@ -6,8 +6,8 @@
 #    ./deploy.sh                 # full install (all nodes) + storage
 #    ./deploy.sh -i my.conf      # use a different inventory
 #    ./deploy.sh check           # test SSH + sudo to every node
-#    ./deploy.sh storage         # (re)install Longhorn only
-#    ./deploy.sh upgrade 1.31.2  # rolling upgrade of the whole cluster
+#    ./deploy.sh storage         # (re)install storage (Longhorn or NFS) only
+#    ./deploy.sh upgrade 1.37.0  # rolling upgrade of the whole cluster
 #    ./deploy.sh reset           # kubeadm reset every node (DESTROYS cluster)
 #
 #  Needs on THIS machine: bash, ssh, scp. Nodes need: sudo, curl. Linux/mac/WSL.
@@ -56,9 +56,31 @@ done < "$INV"
 SSH_USER="${SET[SSH_USER]:-root}"
 SSH_PORT="${SET[SSH_PORT]:-22}"
 SSH_KEY="${SET[SSH_KEY]:-}"; SSH_KEY="${SSH_KEY/#\~/$HOME}"
-K8S_MINOR="${SET[K8S_MINOR]:-1.31}"; K8S_PATCH="${SET[K8S_PATCH]:-}"
+K8S_MINOR="${SET[K8S_MINOR]:-latest}"; K8S_PATCH="${SET[K8S_PATCH]:-}"
+# Resolve K8S_MINOR=latest|auto|empty to the newest stable minor (once, here on
+# the control machine) so every node installs the same version.
+case "$K8S_MINOR" in
+  latest|auto|"")
+    S="$(curl -fsSL https://dl.k8s.io/release/stable.txt 2>/dev/null || true)"
+    if [[ "$S" =~ ^v[0-9]+\.[0-9]+ ]]; then
+      K8S_MINOR="$(echo "${S#v}" | cut -d. -f1,2)"; log "latest stable Kubernetes -> v${K8S_MINOR} (${S})"
+    else
+      warn "could not fetch latest version here; each node will auto-detect"; K8S_MINOR="latest"
+    fi ;;
+esac
 CNI="${SET[CNI]:-flannel}"; POD_CIDR="${SET[POD_CIDR]:-10.244.0.0/16}"
-CPE="${SET[CONTROL_PLANE_ENDPOINT]:-}"; LONGHORN="${SET[LONGHORN]:-true}"
+CPE="${SET[CONTROL_PLANE_ENDPOINT]:-}"
+
+# ---- storage backend: longhorn | nfs | none --------------------------------
+# Back-compat: honour a legacy LONGHORN=true/false if STORAGE is not set.
+STORAGE="${SET[STORAGE]:-}"
+if [[ -z "$STORAGE" ]]; then
+  if [[ "${SET[LONGHORN]:-true}" == true ]]; then STORAGE=longhorn; else STORAGE=none; fi
+fi
+LONGHORN_VERSION="${SET[LONGHORN_VERSION]:-v1.10.0}"
+NFS_SERVER="${SET[NFS_SERVER]:-}"; NFS_PATH="${SET[NFS_PATH]:-/srv/nfs/k8s}"
+NFS_SC_NAME="${SET[NFS_SC_NAME]:-nfs-client}"
+[[ "$STORAGE" == nfs && -z "$NFS_SERVER" ]] && die "STORAGE=nfs — set NFS_SERVER (NFS server IP) in inventory.conf"
 
 # HA auto-detect
 if [[ ${#MASTERS[@]} -gt 1 ]]; then
@@ -68,21 +90,32 @@ else
   HA_MODE=single
 fi
 
-SSH_OPTS=( -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p "$SSH_PORT" )
+# NOTE: ssh takes the port as -p, but scp takes it as -P, so keep the port out
+# of the shared options and pass it per-command (this bit us once already).
+SSH_OPTS=( -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 )
 [[ -n "$SSH_KEY" ]] && SSH_OPTS+=( -i "$SSH_KEY" )
-rsh(){ ssh "${SSH_OPTS[@]}" "${SSH_USER}@$1" "$2"; }
-push(){ scp "${SSH_OPTS[@]}" "$HERE/k8s.sh" "${SSH_USER}@$1:/tmp/k8s.sh" >/dev/null; }
+rsh(){ ssh "${SSH_OPTS[@]}" -p "$SSH_PORT" "${SSH_USER}@$1" "$2"; }
+push(){ scp "${SSH_OPTS[@]}" -P "$SSH_PORT" "$HERE/k8s.sh" "${SSH_USER}@$1:/tmp/k8s.sh" >/dev/null; }
 
 # common env prefix passed into k8s.sh on the remote node
 envstr(){
   echo "K8S_MINOR='$K8S_MINOR' K8S_PATCH='$K8S_PATCH' CNI='$CNI' HA_MODE='$HA_MODE' POD_CIDR='$POD_CIDR' CONTROL_PLANE_ENDPOINT='$CPE'"
 }
 
+# env prefix for the storage step (Longhorn or NFS provisioner)
+storage_envstr(){
+  echo "STORAGE='$STORAGE' LONGHORN_VERSION='$LONGHORN_VERSION' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' NFS_SC_NAME='$NFS_SC_NAME'"
+}
+
 print_plan(){
   echo -e "${b}Cluster plan${n} (inventory: $INV)"
   echo "  mode      : $HA_MODE  (${#MASTERS[@]} master(s), ${#WORKERS[@]} worker(s))"
   echo "  k8s       : v${K8S_MINOR} ${K8S_PATCH:+patch $K8S_PATCH}"
-  echo "  cni       : $CNI    storage: $([[ $LONGHORN == true ]] && echo longhorn || echo none)"
+  if [[ "$STORAGE" == nfs ]]; then
+    echo "  cni       : $CNI    storage: nfs (server=$NFS_SERVER path=$NFS_PATH sc=$NFS_SC_NAME)"
+  else
+    echo "  cni       : $CNI    storage: $STORAGE"
+  fi
   [[ $HA_MODE == multi ]] && echo "  endpoint  : $CPE"
   echo "  ssh       : ${SSH_USER}@... :$SSH_PORT ${SSH_KEY:+key=$SSH_KEY}"
   printf "  masters   :"; for i in "${!MASTERS[@]}"; do printf " %s(%s)" "${MASTERS[$i]}" "${M_IP[$i]}"; done; echo
@@ -119,32 +152,32 @@ cmd_install(){
   fi
 
   if [[ $HA_MODE == multi && ${#MASTERS[@]} -gt 1 ]]; then
-    step "3/4  joining extra masters"
+    step "3a/4  joining extra masters"
     for i in $(seq 1 $((${#MASTERS[@]}-1))); do
       log "join master ${MASTERS[$i]} (${M_IP[$i]})"; push "${M_IP[$i]}"
       rsh "${M_IP[$i]}" "sudo $(envstr) JOIN='$MJOIN' bash /tmp/k8s.sh join"
     done
   fi
 
-  step "3/4  joining workers"
+  step "3b/4  joining workers"
   for i in "${!WORKERS[@]}"; do
     log "join worker ${WORKERS[$i]} (${W_IP[$i]})"; push "${W_IP[$i]}"
     rsh "${W_IP[$i]}" "sudo $(envstr) JOIN='$WJOIN' bash /tmp/k8s.sh join"
   done
 
-  if [[ "$LONGHORN" == true ]]; then
-    step "4/4  installing Longhorn storage (via $M0)"
-    rsh "$M0" "sudo bash /tmp/k8s.sh storage" || warn "storage step reported issues"
+  if [[ "$STORAGE" != none ]]; then
+    step "4/4  installing storage: $STORAGE (via $M0)"
+    rsh "$M0" "sudo $(storage_envstr) bash /tmp/k8s.sh storage" || warn "storage step reported issues"
   fi
 
   step "DONE"; rsh "$M0" "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide" || true
   log "kubeconfig on primary master: /etc/kubernetes/admin.conf  (scp it to your laptop for kubectl)"
 }
 
-cmd_storage(){ push "${M_IP[0]}"; rsh "${M_IP[0]}" "sudo LONGHORN_VERSION=${SET[LONGHORN_VERSION]:-v1.7.2} bash /tmp/k8s.sh storage"; }
+cmd_storage(){ push "${M_IP[0]}"; rsh "${M_IP[0]}" "sudo $(storage_envstr) bash /tmp/k8s.sh storage"; }
 
 cmd_upgrade(){
-  local T="${1:?usage: deploy.sh upgrade <version e.g 1.31.2>}"
+  local T="${1:?usage: deploy.sh upgrade <version e.g 1.37.0>}"
   print_plan; echo; read -rp "Upgrade whole cluster to v$T (one minor only)? [y/N] " a; [[ "$a" =~ ^[Yy]$ ]] || die "aborted"
   step "upgrade primary master ${MASTERS[0]}"; push "${M_IP[0]}"
   rsh "${M_IP[0]}" "sudo bash /tmp/k8s.sh upgrade $T first-master"

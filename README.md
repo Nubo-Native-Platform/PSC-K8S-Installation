@@ -12,8 +12,8 @@ It gives you two ways to work:
 
 | | Setup | You run it from | Best for |
 |---|-------|-----------------|----------|
-| 🅰️ | **Orchestrated** — `deploy.sh` + `inventory.conf` | your laptop | describe the whole cluster in one file; it SSHes to every node for you (Ansible-style) |
-| 🅱️ | **One-liner** — `k8s.sh` | each node | `curl \| sudo bash`; great for public hosting |
+| A | **Orchestrated** — `deploy.sh` + `inventory.conf` | your laptop | describe the whole cluster in one file; it SSHes to every node for you (Ansible-style) |
+| B | **One-liner** — `k8s.sh` | each node | `curl \| sudo bash`; great for public hosting |
 
 Both use the **same engine** (`k8s.sh`), so you can mix them.
 
@@ -23,12 +23,13 @@ Both use the **same engine** (`k8s.sh`), so you can mix them.
 - [What this can do](#what-this-can-do)
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
-- [🅰️ Orchestrated setup (recommended)](#-orchestrated-setup-recommended)
-- [🅱️ One-liner setup](#-one-liner-setup)
+- [Orchestrated setup (recommended)](#orchestrated-setup-recommended)
+- [One-liner setup](#one-liner-setup)
 - [Choosing the Kubernetes version](#choosing-the-kubernetes-version)
 - [Single vs multi-master (HA)](#single-vs-multi-master-ha)
 - [Adding worker nodes later](#adding-worker-nodes-later)
-- [Storage (Longhorn)](#storage-longhorn)
+- [Storage (Longhorn or NFS)](#storage-longhorn-or-nfs)
+- [Load balancer for HA (control-plane endpoint)](#load-balancer-for-ha-control-plane-endpoint)
 - [Upgrading](#upgrading)
 - [Tear down / reset](#tear-down--reset)
 - [Configuration reference](#configuration-reference)
@@ -41,29 +42,31 @@ Both use the **same engine** (`k8s.sh`), so you can mix them.
 
 ## What this can do
 
-- ✅ **Install the latest Kubernetes** — or any version you pick.
-- ✅ **Choose the version** — set a minor track (e.g. `1.31`) and optionally pin
-  an exact patch (e.g. `1.31.2`).
-- ✅ **Upgrade** an existing cluster to a newer version, control-plane-first,
+- **Install the latest Kubernetes** — `K8S_MINOR=latest` auto-detects the
+  newest stable release from upstream at install time (no need to edit anything).
+- **Choose the version** — or pin a minor track (e.g. `1.36`) and optionally
+  an exact patch (e.g. `1.37.0`) for reproducible builds.
+- **Upgrade** an existing cluster to a newer version, control-plane-first,
   draining workers automatically (one command for the whole cluster).
-- ✅ **Single-master or multi-master (HA)** — automatically decided by how many
+- **Single-master or multi-master (HA)** — automatically decided by how many
   masters you list.
-- ✅ **Easily join worker nodes** — the installer prints a ready-to-paste join
+- **Easily join worker nodes** — the installer prints a ready-to-paste join
   command; or the orchestrator joins them all for you.
-- ✅ **Pre-installs everything Kubernetes needs** — container runtime
+- **Pre-installs everything Kubernetes needs** — container runtime
   (containerd, correctly configured), kernel modules, sysctl networking, swap
   off, CNI network plugin (Flannel or Calico), and iSCSI/NFS clients.
-- ✅ **Storage class out of the box** — installs **Longhorn** distributed
-  storage and sets it as the default `StorageClass`.
-- ✅ **Tear down** a cluster cleanly (`kubeadm reset` on every node).
-- ✅ **One inventory file** holds node roles (master1, master2, worker1 …) and
+- **Storage class out of the box** — choose **Longhorn** (distributed
+  replicated block storage on the nodes) or **NFS** (dynamic PVCs from an
+  external NFS server) and it's set as the default `StorageClass`.
+- **Tear down** a cluster cleanly (`kubeadm reset` on every node).
+- **One inventory file** holds node roles (master1, master2, worker1 …) and
   SSH details, so you never SSH manually.
 
 ### What it does **not** do (by design, to stay simple)
-- ❌ Provision the servers/VMs themselves (bring your own Linux hosts).
-- ❌ Set up an external load balancer or VIP for you — for HA you point it at a
+- Provision the servers/VMs themselves (bring your own Linux hosts).
+- Set up an external load balancer or VIP for you — for HA you point it at a
   VIP/LB you provide (keepalived, HAProxy, cloud LB, etc.).
-- ❌ Skip Kubernetes' rules: upgrades go **one minor at a time**.
+- Skip Kubernetes' rules: upgrades go **one minor at a time**.
 
 ---
 
@@ -77,7 +80,7 @@ subcommands:
 | `init` | prepares the node, runs `kubeadm init`, installs the CNI, prints join commands |
 | `join` | prepares the node and joins it to the cluster (worker or extra master) |
 | `token` | prints a fresh join command (run on a master) |
-| `storage` | installs Longhorn + sets the default StorageClass |
+| `storage` | installs storage (Longhorn or NFS) + sets the default StorageClass |
 | `upgrade <ver> <role>` | upgrades this node (`first-master` / `master` / `worker`) |
 
 The orchestrator **`deploy.sh`** simply reads `inventory.conf` and runs those
@@ -111,19 +114,24 @@ subcommands on the right nodes over SSH, in the right order.
 
 ---
 
-## 🅰️ Orchestrated setup (recommended)
+## Orchestrated setup (recommended)
 
 Run the entire cluster build from one machine. **You never SSH manually.**
 
 ### 1. Describe the cluster — [`inventory.conf`](inventory.conf)
 ```ini
 [settings]
-K8S_MINOR=1.31                 # Kubernetes minor track
-K8S_PATCH=                     # empty = latest patch, or pin e.g. 1.31.2
+K8S_MINOR=latest               # "latest" = newest stable (auto-detected), or pin e.g. 1.37
+K8S_PATCH=                     # empty = latest patch, or pin e.g. 1.37.0
 CNI=flannel                    # flannel | calico
 CONTROL_PLANE_ENDPOINT=        # only for HA: VIP/LB, e.g. 10.0.0.10:6443
+
 POD_CIDR=10.244.0.0/16
-LONGHORN=true                  # install Longhorn storage at the end
+
+STORAGE=longhorn               # longhorn | nfs | none
+# NFS_SERVER=10.0.0.30         # required when STORAGE=nfs
+# NFS_PATH=/srv/nfs/k8s
+# NFS_SC_NAME=nfs-client
 
 SSH_USER=ubuntu                # login user (needs sudo)
 SSH_KEY=~/.ssh/id_rsa          # private key (blank = agent/password)
@@ -147,19 +155,19 @@ worker2  10.0.0.22
 
 `deploy.sh` will: prep every node → `kubeadm init` the first master → install
 the CNI → collect join tokens → join the other masters and all workers →
-install Longhorn → print `kubectl get nodes`.
+install storage (Longhorn or NFS) → print `kubectl get nodes`.
 
 ### 3. Other actions
 ```bash
 ./deploy.sh -i staging.conf     # use a different inventory file
-./deploy.sh storage             # (re)install Longhorn only
-./deploy.sh upgrade 1.31.2      # rolling upgrade the whole cluster
+./deploy.sh storage             # (re)install storage only
+./deploy.sh upgrade 1.37.0      # rolling upgrade the whole cluster
 ./deploy.sh reset               # tear the cluster down
 ```
 
 ---
 
-## 🅱️ One-liner setup
+## One-liner setup
 
 For per-node installs or when you host `k8s.sh` at a public URL. Edit the
 `SELF_URL=` line near the bottom of `k8s.sh` to your hosting URL first.
@@ -178,7 +186,7 @@ curl -sfL https://YOUR_HOST/k8s.sh | sudo bash -s -- storage
 Configure with env vars (no files to edit):
 ```bash
 curl -sfL https://YOUR_HOST/k8s.sh | sudo \
-  K8S_MINOR=1.31 CNI=calico HA_MODE=multi \
+  K8S_MINOR=latest CNI=calico HA_MODE=multi \
   CONTROL_PLANE_ENDPOINT=10.0.0.10:6443 \
   bash -s -- init
 ```
@@ -193,9 +201,16 @@ separate scripts over a single file.
 
 | Goal | Set |
 |------|-----|
-| Latest patch on a minor | `K8S_MINOR=1.31`, `K8S_PATCH=` (empty) |
-| Exact pinned version | `K8S_MINOR=1.31`, `K8S_PATCH=1.31.2` |
-| A different minor | change `K8S_MINOR` (e.g. `1.30`) |
+| **Absolute latest stable** (auto) | `K8S_MINOR=latest`, `K8S_PATCH=` (empty) |
+| Latest patch on a chosen minor | `K8S_MINOR=1.36`, `K8S_PATCH=` (empty) |
+| Exact pinned version | `K8S_MINOR=1.37`, `K8S_PATCH=1.37.0` |
+| A different minor | change `K8S_MINOR` (e.g. `1.35`) |
+
+With `K8S_MINOR=latest`, the installer reads
+`https://dl.k8s.io/release/stable.txt` at install time and installs whatever the
+newest stable minor is (e.g. `v1.37.0` → the `1.37` track). The orchestrator
+resolves it **once** on your machine so every node gets the same version. Pin a
+minor for reproducible builds or air-gapped mirrors.
 
 List what's installable:
 ```bash
@@ -213,11 +228,42 @@ list in `inventory.conf`:
 - **1 master** → single control plane (simplest; fine for dev/small prod).
 - **2+ masters** → HA (stacked etcd). You must set `CONTROL_PLANE_ENDPOINT` to
   a **VIP or load balancer** that fronts all masters (keepalived, HAProxy, or a
-  cloud L4 LB). This is the standard kubeadm HA requirement.
+  cloud L4 LB). This is the standard kubeadm HA requirement. If you don't have
+  one, [`scripts/lb-haproxy-setup.sh`](scripts/lb-haproxy-setup.sh) stands up
+  HAProxy on a spare host in one command (see the next section).
 
 In the one-liner setup, choose it explicitly with `HA_MODE=single|multi`.
 
 > HA needs an **odd** number of masters (1, 3, 5) so etcd can keep quorum.
+> **3 masters is the typical HA size** and is what the bundled
+> [`prod1-cluster.conf`](prod1-cluster.conf) example uses (3 masters + 5 workers).
+
+---
+
+## Load balancer for HA (control-plane endpoint)
+
+With 2+ masters, kubeadm requires a single, stable address that fronts all
+control-plane nodes' `:6443`. Every node and every `kubectl` talks to this one
+endpoint, and it must keep working if a master goes down.
+
+**Quick option (lab/test) — HAProxy on a dedicated proxy host** (not a master,
+and not the NFS/file server — keep roles separate):
+```bash
+# on the proxy host (must NOT be one of the masters):
+sudo ./scripts/lb-haproxy-setup.sh 192.168.18.61 192.168.18.62 192.168.18.63
+# it prints the endpoint, e.g. 192.168.18.51:6443
+```
+Then set that in your inventory before deploying:
+```ini
+CONTROL_PLANE_ENDPOINT=192.168.18.51:6443
+```
+> Backends show **DOWN** until the first master finishes `kubeadm init` — that's
+> expected. A single HAProxy host is itself a single point of failure.
+
+**Production option — keepalived VIP + HAProxy on 2+ hosts.** Run HAProxy on
+multiple hosts and share a floating **virtual IP** with keepalived, then point
+`CONTROL_PLANE_ENDPOINT` at the VIP. This removes the LB as a single point of
+failure. (Cloud users: use a managed L4 load balancer instead.)
 
 ---
 
@@ -240,16 +286,24 @@ curl -sfL https://YOUR_HOST/k8s.sh | sudo JOIN="kubeadm join ..." bash -s -- joi
 
 ---
 
-## Storage (Longhorn)
+## Storage (Longhorn or NFS)
+
+Pick **one** backend with `STORAGE=longhorn | nfs | none`. Whichever you choose
+is installed at the end of the build and set as the **default StorageClass**, so
+a plain PVC just works. iSCSI + NFS clients are pre-installed on every node
+during prep, so both backends are ready to go.
+
+> Only one runs at a time. This project's test cluster uses **NFS**; Longhorn is
+> documented and fully supported too — just set `STORAGE=longhorn`.
+
+### Option A — Longhorn (distributed block storage)
 
 Longhorn gives you dynamic, replicated block storage with a web UI — no cloud
-disks needed.
+disks and no separate storage server needed (data lives on the nodes).
 
-- Installed automatically when `LONGHORN=true` (orchestrated) or via
-  `k8s.sh storage`.
-- Set as the **default StorageClass**, so a plain PVC just works.
-- iSCSI + NFS clients are pre-installed on every node during prep (Longhorn
-  needs them).
+- `STORAGE=longhorn` (orchestrated) or `sudo bash k8s.sh storage` with
+  `STORAGE=longhorn` (default).
+- Version via `LONGHORN_VERSION` (default `v1.10.0`).
 
 Open the UI:
 ```bash
@@ -257,7 +311,43 @@ kubectl -n longhorn-system port-forward svc/longhorn-frontend 8080:80
 # then browse http://localhost:8080
 ```
 
-Quick test that storage works:
+### Option B — NFS (external NFS server)
+
+Best when you already have (or want) a central file server. PVCs are dynamically
+provisioned as subdirectories on one NFS export by the CNCF/SIG-Storage
+[`nfs-subdir-external-provisioner`](https://github.com/kubernetes-sigs/nfs-subdir-external-provisioner).
+No per-node disks are consumed — all data lives on the NFS server. (Note: NFS is
+`ReadWriteMany`-capable but is a single point of failure unless the server
+itself is made HA.)
+
+**1) Prepare the NFS server** (run on the file server, e.g. `192.168.18.69`):
+```bash
+sudo NFS_CIDR=192.168.18.0/24 ./scripts/nfs-server-setup.sh
+# installs nfs-kernel-server, creates /srv/nfs/k8s, exports it to the network,
+# and opens the firewall.
+```
+
+**2) Point the cluster at it.** Orchestrated — in your inventory:
+```ini
+STORAGE=nfs
+NFS_SERVER=192.168.18.69
+NFS_PATH=/srv/nfs/k8s
+NFS_SC_NAME=nfs-client
+```
+then `./deploy.sh` (or `./deploy.sh storage` to (re)install storage only).
+
+One-liner / per-node engine — on a master:
+```bash
+sudo STORAGE=nfs NFS_SERVER=192.168.18.69 NFS_PATH=/srv/nfs/k8s \
+  bash k8s.sh storage
+```
+Modular scripts — on a master:
+```bash
+sudo NFS_SERVER=192.168.18.69 NFS_PATH=/srv/nfs/k8s ./scripts/04b-storage-nfs.sh
+```
+
+### Quick test (either backend)
+
 ```bash
 kubectl apply -f - <<'EOF'
 apiVersion: v1
@@ -267,26 +357,26 @@ spec:
   accessModes: [ReadWriteOnce]
   resources: { requests: { storage: 1Gi } }
 EOF
-kubectl get pvc test-pvc      # should become Bound
+kubectl get pvc test-pvc      # should become Bound (uses the default StorageClass)
 ```
 
 ---
 
 ## Upgrading
 
-Kubernetes only supports moving **one minor at a time** (1.30 → 1.31, not
-1.29 → 1.31 in one hop — run it twice). Control plane goes first.
+Kubernetes only supports moving **one minor at a time** (1.36 → 1.37, not
+1.35 → 1.37 in one hop — run it twice). Control plane goes first.
 
 **Orchestrated (does the whole cluster, drains each worker):**
 ```bash
-./deploy.sh upgrade 1.31.2
+./deploy.sh upgrade 1.37.0
 ```
 
 **Manual (per node):**
 ```bash
-sudo bash k8s.sh upgrade 1.31.2 first-master   # on the first master
-sudo bash k8s.sh upgrade 1.31.2 master         # on each other master
-sudo bash k8s.sh upgrade 1.31.2 worker         # on each worker
+sudo bash k8s.sh upgrade 1.37.0 first-master   # on the first master
+sudo bash k8s.sh upgrade 1.37.0 master         # on each other master
+sudo bash k8s.sh upgrade 1.37.0 worker         # on each worker
 ```
 Afterwards, update `K8S_MINOR`/`K8S_PATCH` in your config so new nodes match.
 
@@ -308,7 +398,7 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `K8S_MINOR` | `1.31` | Kubernetes minor track to install |
+| `K8S_MINOR` | `latest` | `latest` = auto-detect newest stable; or pin a minor (e.g. `1.37`) |
 | `K8S_PATCH` | *(empty)* | exact patch to pin; empty = latest on the minor |
 | `CNI` | `flannel` | network plugin: `flannel` or `calico` |
 | `HA_MODE` | auto/`single` | `single` or `multi` (orchestrated auto-detects) |
@@ -316,8 +406,15 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `POD_CIDR` | `10.244.0.0/16` | pod network range (Calico prefers `192.168.0.0/16`) |
 | `SERVICE_CIDR` | `10.96.0.0/12` | service network range |
 | `APISERVER_ADVERTISE_ADDRESS` | auto | which node IP the API server advertises |
-| `LONGHORN` / `LONGHORN_VERSION` | `true` / `v1.7.2` | install storage + version |
+| `STORAGE` | `longhorn` | storage backend: `longhorn`, `nfs`, or `none` |
+| `LONGHORN_VERSION` | `v1.10.0` | Longhorn version (when `STORAGE=longhorn`) |
+| `NFS_SERVER` | *(empty)* | NFS server IP/host — **required when `STORAGE=nfs`** |
+| `NFS_PATH` | `/srv/nfs/k8s` | exported directory on the NFS server |
+| `NFS_SC_NAME` | `nfs-client` | StorageClass name to create (NFS) |
 | `SSH_USER` / `SSH_KEY` / `SSH_PORT` | `ubuntu` / `~/.ssh/id_rsa` / `22` | SSH access (orchestrated only) |
+
+> **Back-compat:** the old `LONGHORN=true/false` key still works — if `STORAGE`
+> is not set, `LONGHORN=true` maps to `STORAGE=longhorn` and `false` to `none`.
 
 ---
 
@@ -325,13 +422,17 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 
 | File | Purpose |
 |------|---------|
-| `deploy.sh` | 🅰️ orchestrator — builds/upgrades/resets the whole cluster over SSH |
-| `inventory.conf` | 🅰️ node roles + SSH details + settings |
-| `k8s.sh` | 🅱️ one-file engine (`init`/`join`/`token`/`storage`/`upgrade`) |
-| `scripts/01-prereqs.sh` | modular: node prep (containerd, kube tools, sysctl, iscsi) |
+| `deploy.sh` | A orchestrator — builds/upgrades/resets the whole cluster over SSH |
+| `inventory.conf` | A node roles + SSH details + settings (generic example) |
+| `prod1-cluster.conf` | A ready-to-run example: 3 masters + 5 workers + NFS |
+| `k8s.sh` | B one-file engine (`init`/`join`/`token`/`storage`/`upgrade`) |
+| `scripts/01-prereqs.sh` | modular: node prep (containerd, kube tools, sysctl, iscsi/nfs) |
 | `scripts/02-init-master.sh` | modular: init first control plane + CNI |
 | `scripts/03-join-node.sh` | modular: join a worker or extra master |
 | `scripts/04-storage-longhorn.sh` | modular: install Longhorn |
+| `scripts/04b-storage-nfs.sh` | modular: install NFS provisioner + StorageClass |
+| `scripts/nfs-server-setup.sh` | set up the external NFS server (run on the file server) |
+| `scripts/lb-haproxy-setup.sh` | stand up an HAProxy control-plane LB for HA |
 | `scripts/05-upgrade.sh` | modular: per-node upgrade |
 | `scripts/list-versions.sh` | list installable Kubernetes versions |
 | `scripts/lib.sh` / `config/cluster.env` | shared helpers / config for the modular scripts |
@@ -399,10 +500,10 @@ backups, monitoring, and an ingress controller (easy to add on top).
 
 This repository is maintained as part of the Nubo Native Platform.
 
-- 🤝 [Contributing guide](CONTRIBUTING.md) — how to propose and submit changes
-- 📜 [Code of Conduct](CODE_OF_CONDUCT.md) — CNCF Community Code of Conduct
-- 🔐 [Security policy](SECURITY.md) — how to report vulnerabilities
-- 👥 [Maintainers](MAINTAINERS.md)
+- [Contributing guide](CONTRIBUTING.md) — how to propose and submit changes
+- [Code of Conduct](CODE_OF_CONDUCT.md) — CNCF Community Code of Conduct
+- [Security policy](SECURITY.md) — how to report vulnerabilities
+- [Maintainers](MAINTAINERS.md)
 
 Contact: **contribution@nubons.com**
 

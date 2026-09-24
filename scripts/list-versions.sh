@@ -3,6 +3,7 @@
 #   ./list-versions.sh          # uses K8S_MINOR from config
 #   ./list-versions.sh 1.30     # any minor
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+resolve_k8s_minor
 MINOR="${1:-$K8S_MINOR}"
 PM="$(detect_pm)"
 log "available patches on the v${MINOR} track:"

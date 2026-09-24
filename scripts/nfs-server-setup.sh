@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# nfs-server-setup.sh — turn a plain Ubuntu/RHEL box into an NFS server for
+# Kubernetes dynamic storage (used by STORAGE=nfs / 04b-storage-nfs.sh).
+#
+# Run this ON THE FILE SERVER (e.g. 192.168.18.69), as root:
+#   sudo ./nfs-server-setup.sh
+#
+# Config via env vars (all optional):
+#   NFS_PATH   exported directory              (default /srv/nfs/k8s)
+#   NFS_CIDR   client network allowed to mount (default auto: this host's /24)
+#   NFS_OPTS   export options                  (default rw,sync,no_subtree_check,no_root_squash)
+#
+# Example — export to the 192.168.18.0/24 lab network:
+#   sudo NFS_PATH=/srv/nfs/k8s NFS_CIDR=192.168.18.0/24 ./nfs-server-setup.sh
+set -euo pipefail
+
+g='\033[0;32m'; y='\033[0;33m'; r='\033[0;31m'; n='\033[0m'
+log(){ echo -e "${g}[+]${n} $*"; }
+warn(){ echo -e "${y}[!]${n} $*"; }
+die(){ echo -e "${r}[x]${n} $*" >&2; exit 1; }
+[[ $EUID -eq 0 ]] || die "run as root (use sudo)"
+
+NFS_PATH="${NFS_PATH:-/srv/nfs/k8s}"
+NFS_OPTS="${NFS_OPTS:-rw,sync,no_subtree_check,no_root_squash}"
+# Default client CIDR = this host's primary IPv4 /24 (e.g. 192.168.18.0/24).
+if [[ -z "${NFS_CIDR:-}" ]]; then
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')"
+  [[ -n "$ip" ]] || die "could not auto-detect network; set NFS_CIDR (e.g. 192.168.18.0/24)"
+  NFS_CIDR="$(echo "$ip" | awk -F. '{print $1"."$2"."$3".0/24"}')"
+  warn "NFS_CIDR not set — defaulting to ${NFS_CIDR} (override with NFS_CIDR=...)"
+fi
+
+pm(){ command -v apt-get >/dev/null && echo apt || { command -v dnf >/dev/null && echo dnf || die "need apt or dnf"; }; }
+P="$(pm)"
+
+log "installing NFS server packages"
+if [[ "$P" == apt ]]; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq nfs-kernel-server
+  SVC=nfs-kernel-server
+else
+  dnf install -y -q nfs-utils
+  SVC=nfs-server
+fi
+
+log "creating export directory ${NFS_PATH}"
+mkdir -p "$NFS_PATH"
+# 777 keeps it simple for a lab; the provisioner creates per-PVC subdirs. Tighten
+# with proper uid/gid mapping for production.
+chmod 777 "$NFS_PATH"
+
+log "configuring /etc/exports  (${NFS_PATH}  ${NFS_CIDR}(${NFS_OPTS}))"
+LINE="${NFS_PATH} ${NFS_CIDR}(${NFS_OPTS})"
+touch /etc/exports
+# replace any existing line for this path, else append
+if grep -qE "^${NFS_PATH//\//\\/}[[:space:]]" /etc/exports; then
+  sed -i "s#^${NFS_PATH//\//\\/}[[:space:]].*#${LINE}#" /etc/exports
+else
+  echo "$LINE" >>/etc/exports
+fi
+
+log "applying exports + enabling service"
+exportfs -ra
+systemctl enable --now "$SVC" >/dev/null 2>&1 || systemctl restart "$SVC"
+
+# Open the firewall if one is active.
+if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+  log "ufw active — allowing NFS from ${NFS_CIDR}"
+  ufw allow from "$NFS_CIDR" to any port nfs >/dev/null 2>&1 || ufw allow nfs >/dev/null 2>&1 || true
+elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+  log "firewalld active — allowing nfs/mountd/rpc-bind"
+  firewall-cmd --permanent --add-service={nfs,mountd,rpc-bind} >/dev/null 2>&1 || true
+  firewall-cmd --reload >/dev/null 2>&1 || true
+fi
+
+echo
+log "NFS server ready."
+log "current exports:"; exportfs -v || true
+echo
+log "Now, on a master, create the StorageClass pointing here:"
+echo "    STORAGE=nfs NFS_SERVER=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}') NFS_PATH=${NFS_PATH}"
+echo "    (via  ./deploy.sh storage   or   scripts/04b-storage-nfs.sh)"
