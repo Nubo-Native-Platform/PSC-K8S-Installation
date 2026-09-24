@@ -155,12 +155,22 @@ worker2  10.0.0.22
 
 `deploy.sh` will: prep every node → `kubeadm init` the first master → install
 the CNI → collect join tokens → join the other masters and all workers →
-install storage (Longhorn or NFS) → print `kubectl get nodes`.
+install storage (Longhorn or NFS) → print `kubectl get nodes` → **fetch the
+admin kubeconfig to `./kubeconfig`** on your machine.
+
+Use it right away:
+```bash
+export KUBECONFIG="$PWD/kubeconfig"
+kubectl get nodes
+```
+Re-fetch it any time with `./deploy.sh kubeconfig`. (It contains cluster-admin
+credentials and is git-ignored — keep it safe.)
 
 ### 3. Other actions
 ```bash
 ./deploy.sh -i staging.conf     # use a different inventory file
 ./deploy.sh storage             # (re)install storage only
+./deploy.sh kubeconfig          # fetch admin kubeconfig to ./kubeconfig
 ./deploy.sh upgrade 1.37.0      # rolling upgrade the whole cluster
 ./deploy.sh reset               # tear the cluster down
 ```
