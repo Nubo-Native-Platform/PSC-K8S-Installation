@@ -441,6 +441,11 @@ sudo NFS_CIDR=192.168.18.0/24 ./scripts/nfs-server-setup.sh
 # installs nfs-kernel-server, creates /srv/nfs/k8s, exports it to the network,
 # and opens the firewall.
 ```
+> **Hardened export.** The export uses `root_squash,all_squash` (every client
+> UID, including root, maps to `nobody`) and the export root is `0755` owned by
+> `nobody` — so a compromised client can't act as root on the server and nothing
+> is world-writable, while dynamic provisioning still works for root and
+> non-root pods. It's also restricted to `NFS_CIDR`. Override with `NFS_OPTS`.
 
 > **Accidental-deletion protection.** By default `NFS_ARCHIVE_ON_DELETE=true`, so
 > deleting a PVC does **not** wipe its data — the provisioner renames the folder
