@@ -114,20 +114,20 @@ LB_PASSWORD="${SET[LB_PASSWORD]:-}"; NFS_PASSWORD="${SET[NFS_PASSWORD]:-}"
 BOOTSTRAP="${SET[BOOTSTRAP]:-auto}"    # auto | true | false
 
 # ---- Knative + Istio (optional) --------------------------------------------
-KNATIVE="${SET[KNATIVE]:-false}"                 # true = install during ./deploy.sh
-KNATIVE_EVENTING="${SET[KNATIVE_EVENTING]:-false}"
+KNATIVE="${SET[KNATIVE]:-true}"                  # installed by default; set false to skip
+KNATIVE_EVENTING="${SET[KNATIVE_EVENTING]:-true}"
 ISTIO_VERSION="${SET[ISTIO_VERSION]:-1.31.1}"
 KNATIVE_VERSION="${SET[KNATIVE_VERSION]:-knative-v1.23.0}"
 KNATIVE_INGRESS_TYPE="${SET[KNATIVE_INGRESS_TYPE]:-NodePort}"
 KNATIVE_DOMAIN_IP="${SET[KNATIVE_DOMAIN_IP]:-${M_IP[0]}}"
 
 # ---- Argo CD (optional) ----------------------------------------------------
-ARGOCD="${SET[ARGOCD]:-false}"                   # true = install during ./deploy.sh
+ARGOCD="${SET[ARGOCD]:-true}"                    # installed by default; set false to skip
 ARGOCD_VERSION="${SET[ARGOCD_VERSION]:-v3.5.3}"
 ARGOCD_INGRESS_TYPE="${SET[ARGOCD_INGRESS_TYPE]:-NodePort}"
 
 # ---- OpenBao secret manager (optional) -------------------------------------
-OPENBAO="${SET[OPENBAO]:-false}"                 # true = install during ./deploy.sh
+OPENBAO="${SET[OPENBAO]:-true}"                  # installed by default; set false to skip
 OPENBAO_REPLICAS="${SET[OPENBAO_REPLICAS]:-3}"
 OPENBAO_INGRESS_TYPE="${SET[OPENBAO_INGRESS_TYPE]:-ClusterIP}"
 OPENBAO_STORAGE_CLASS="${SET[OPENBAO_STORAGE_CLASS]:-}"

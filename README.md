@@ -633,15 +633,15 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `MAX_PODS` | `110` | kubelet max pods per node (keep ≤250 with a `/24` podCIDR) |
 | `INOTIFY_MAX_USER_INSTANCES` | `8192` | inotify instances/node (kernel default 128 is too low) |
 | `INOTIFY_MAX_USER_WATCHES` | `1048576` | inotify watches/node |
-| `KNATIVE` | `false` | `true` = install Knative + Istio during `./deploy.sh` |
-| `KNATIVE_EVENTING` | `false` | also install Knative Eventing (brokers/triggers) |
+| `KNATIVE` | `true` | `true` = install Knative + Istio during `./deploy.sh` |
+| `KNATIVE_EVENTING` | `true` | also install Knative Eventing (brokers/triggers) |
 | `ISTIO_VERSION` / `KNATIVE_VERSION` | `1.31.1` / `knative-v1.23.0` | pinned versions |
 | `KNATIVE_INGRESS_TYPE` | `NodePort` | `NodePort` (no LB needed) or `LoadBalancer` |
 | `KNATIVE_DOMAIN_IP` | first master | node IP for Magic DNS (`<ip>.sslip.io`) |
-| `ARGOCD` | `false` | `true` = install Argo CD (GitOps) during `./deploy.sh` |
+| `ARGOCD` | `true` | `true` = install Argo CD (GitOps) during `./deploy.sh` |
 | `ARGOCD_VERSION` | `v3.5.3` | pinned Argo CD release |
 | `ARGOCD_INGRESS_TYPE` | `NodePort` | `NodePort`, `LoadBalancer`, or `ClusterIP` for the Argo CD server |
-| `OPENBAO` | `false` | `true` = install OpenBao (HA Raft secret manager) during `./deploy.sh` |
+| `OPENBAO` | `true` | `true` = install OpenBao (HA Raft secret manager) during `./deploy.sh` |
 | `OPENBAO_REPLICAS` | `3` | Raft voters (3 or 5) |
 | `OPENBAO_INGRESS_TYPE` | `ClusterIP` | `ClusterIP` or `NodePort` for the OpenBao service |
 | `OPENBAO_STORAGE_CLASS` | *(default SC)* | StorageClass for Raft data (use local/block for production) |
