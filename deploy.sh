@@ -8,6 +8,7 @@
 #    ./deploy.sh check           # test SSH + sudo to every node
 #    ./deploy.sh bootstrap       # only install SSH keys + passwordless sudo
 #    ./deploy.sh provision       # only set up the LB and/or NFS server
+#    ./deploy.sh knative         # install Knative (Serving/Eventing) on Istio
 #    ./deploy.sh add-worker w6 10.0.0.26 [pw]   # join ONE new worker later
 #    ./deploy.sh remove-worker prod1-...-w6 [ip] # drain + remove a worker
 #    ./deploy.sh storage         # (re)install storage (Longhorn or NFS) only
@@ -109,6 +110,14 @@ NFS_CIDR="${SET[NFS_CIDR]:-}"
 # from the 3rd inventory column). BOOTSTRAP=auto runs it only if any password is set.
 LB_PASSWORD="${SET[LB_PASSWORD]:-}"; NFS_PASSWORD="${SET[NFS_PASSWORD]:-}"
 BOOTSTRAP="${SET[BOOTSTRAP]:-auto}"    # auto | true | false
+
+# ---- Knative + Istio (optional) --------------------------------------------
+KNATIVE="${SET[KNATIVE]:-false}"                 # true = install during ./deploy.sh
+KNATIVE_EVENTING="${SET[KNATIVE_EVENTING]:-false}"
+ISTIO_VERSION="${SET[ISTIO_VERSION]:-1.31.1}"
+KNATIVE_VERSION="${SET[KNATIVE_VERSION]:-knative-v1.23.0}"
+KNATIVE_INGRESS_TYPE="${SET[KNATIVE_INGRESS_TYPE]:-NodePort}"
+KNATIVE_DOMAIN_IP="${SET[KNATIVE_DOMAIN_IP]:-${M_IP[0]}}"
 
 # HA auto-detect
 if [[ ${#MASTERS[@]} -gt 1 ]]; then
@@ -266,6 +275,8 @@ cmd_install(){
   fi
 
   step "DONE"; rsh "$M0" "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide" || true
+  [[ "$KNATIVE" == true ]] && cmd_knative
+
   if [[ "$FETCH_KUBECONFIG" == true ]]; then
     fetch_kubeconfig
   else
@@ -290,6 +301,19 @@ fetch_kubeconfig(){
 }
 
 cmd_storage(){ push "${M_IP[0]}"; rsh "${M_IP[0]}" "sudo $(storage_envstr) bash /tmp/k8s.sh storage"; }
+
+knative_envstr(){
+  echo "ISTIO_VERSION='$ISTIO_VERSION' KNATIVE_VERSION='$KNATIVE_VERSION' KNATIVE_EVENTING='$KNATIVE_EVENTING' KNATIVE_INGRESS_TYPE='$KNATIVE_INGRESS_TYPE' KNATIVE_DOMAIN_IP='$KNATIVE_DOMAIN_IP'"
+}
+
+# Install Knative (Serving + optional Eventing) on Istio, via the first master.
+cmd_knative(){
+  [[ -f "$HERE/scripts/06-knative-istio.sh" ]] || die "scripts/06-knative-istio.sh not found"
+  local M0="${M_IP[0]}"
+  step "installing Knative + Istio (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/06-knative-istio.sh"
+  rsh "$M0" "sudo $(knative_envstr) bash /tmp/06-knative-istio.sh"
+}
 
 # Add a single worker to an existing cluster (does NOT touch existing nodes).
 #   ./deploy.sh add-worker <name> <ip> [password]
@@ -368,8 +392,9 @@ case "$ACTION" in
   add-worker)    shift; cmd_add_worker "$@" ;;
   remove-worker) shift; cmd_remove_worker "$@" ;;
   storage)    cmd_storage ;;
+  knative)    cmd_knative ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | knative | kubeconfig | upgrade <ver> | reset)";;
 esac

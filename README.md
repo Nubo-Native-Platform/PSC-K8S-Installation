@@ -30,6 +30,7 @@ Both use the **same engine** (`k8s.sh`), so you can mix them.
 - [Adding worker nodes later](#adding-worker-nodes-later)
 - [Storage (Longhorn or NFS)](#storage-longhorn-or-nfs)
 - [Load balancer for HA (control-plane endpoint)](#load-balancer-for-ha-control-plane-endpoint)
+- [Knative (Serving + Eventing) on Istio](#knative-serving--eventing-on-istio)
 - [Upgrading](#upgrading)
 - [Tear down / reset](#tear-down--reset)
 - [Configuration reference](#configuration-reference)
@@ -228,6 +229,7 @@ credentials and is git-ignored — keep it safe.)
 ./deploy.sh add-worker w6 IP    # join ONE new worker to the existing cluster
 ./deploy.sh remove-worker NODE  # drain + remove a worker from the cluster
 ./deploy.sh storage             # (re)install storage only
+./deploy.sh knative             # install Knative (Serving/Eventing) on Istio
 ./deploy.sh kubeconfig          # fetch admin kubeconfig to ./kubeconfig
 ./deploy.sh upgrade 1.37.0      # rolling upgrade the whole cluster
 ./deploy.sh reset               # tear the cluster down
@@ -468,6 +470,62 @@ kubectl get pvc test-pvc      # should become Bound (uses the default StorageCla
 
 ---
 
+## Knative (Serving + Eventing) on Istio
+
+Run serverless, request-driven workloads (scale-to-zero autoscaling) with
+[Knative](https://knative.dev), using **Istio** as the networking layer — which
+also gives you a working **service mesh with sidecar injection**.
+
+Install it (from your machine, after the cluster is up):
+```bash
+./deploy.sh knative            # or set KNATIVE=true in the inventory to include it in install
+```
+This installs Istio (`istioctl`), sets the ingress gateway to **NodePort**,
+installs Knative Serving + the `net-istio` layer, enables Istio sidecar injection
+on `knative-serving` (PERMISSIVE mTLS), points the domain at
+`<KNATIVE_DOMAIN_IP>.sslip.io` (Magic DNS), and — with `KNATIVE_EVENTING=true` —
+installs Knative Eventing (brokers, triggers, in-memory channel). Versions are
+pinned (`ISTIO_VERSION`, `KNATIVE_VERSION`).
+
+Deploy a service and call it through the gateway NodePort:
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata: { name: hello }
+spec:
+  template:
+    spec:
+      containers:
+        - image: gcr.io/knative-samples/helloworld-go
+          env: [{ name: TARGET, value: "World" }]
+EOF
+URL=$(kubectl get ksvc hello -o jsonpath='{.status.url}')     # http://hello.default.<ip>.sslip.io
+NP=$(kubectl -n istio-system get svc istio-ingressgateway -o jsonpath='{.spec.ports[?(@.port==80)].nodePort}')
+curl -H "Host: ${URL#http://}" http://<any-node-ip>:$NP        # -> Hello World!
+```
+
+**Sidecar injection.** To put an app's pods into the mesh, label the namespace
+and add the inject annotation to the Knative Service:
+```bash
+kubectl label namespace myns istio-injection=enabled
+```
+```yaml
+spec:
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/inject: "true"
+```
+On Istio 1.31 the proxy is a **native sidecar** (an always-on init container), so
+an injected Knative pod runs `user-container` + `queue-proxy` with `istio-init` +
+`istio-proxy`, showing as `3/3` Ready.
+
+> NodePort needs no load balancer. For real external IPs (a `LoadBalancer`
+> gateway), install MetalLB and set `KNATIVE_INGRESS_TYPE=LoadBalancer`.
+
+---
+
 ## Upgrading
 
 Kubernetes only supports moving **one minor at a time** (1.36 → 1.37, not
@@ -514,6 +572,11 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `MAX_PODS` | `110` | kubelet max pods per node (keep ≤250 with a `/24` podCIDR) |
 | `INOTIFY_MAX_USER_INSTANCES` | `8192` | inotify instances/node (kernel default 128 is too low) |
 | `INOTIFY_MAX_USER_WATCHES` | `1048576` | inotify watches/node |
+| `KNATIVE` | `false` | `true` = install Knative + Istio during `./deploy.sh` |
+| `KNATIVE_EVENTING` | `false` | also install Knative Eventing (brokers/triggers) |
+| `ISTIO_VERSION` / `KNATIVE_VERSION` | `1.31.1` / `knative-v1.23.0` | pinned versions |
+| `KNATIVE_INGRESS_TYPE` | `NodePort` | `NodePort` (no LB needed) or `LoadBalancer` |
+| `KNATIVE_DOMAIN_IP` | first master | node IP for Magic DNS (`<ip>.sslip.io`) |
 | `APISERVER_ADVERTISE_ADDRESS` | auto | which node IP the API server advertises |
 | `STORAGE` | `longhorn` | storage backend: `longhorn`, `nfs`, or `none` |
 | `LONGHORN_VERSION` | `v1.10.0` | Longhorn version (when `STORAGE=longhorn`) |
@@ -550,6 +613,7 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `scripts/04b-storage-nfs.sh` | modular: install NFS provisioner + StorageClass |
 | `scripts/nfs-server-setup.sh` | set up the external NFS server (run on the file server) |
 | `scripts/lb-haproxy-setup.sh` | stand up an HAProxy control-plane LB for HA |
+| `scripts/06-knative-istio.sh` | install Knative (Serving/Eventing) on Istio + sidecar injection |
 | `scripts/05-upgrade.sh` | modular: per-node upgrade |
 | `scripts/list-versions.sh` | list installable Kubernetes versions |
 | `scripts/lib.sh` / `config/cluster.env` | shared helpers / config for the modular scripts |
