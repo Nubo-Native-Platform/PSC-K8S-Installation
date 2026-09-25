@@ -16,10 +16,16 @@ overlay
 br_netfilter
 EOF
 modprobe overlay; modprobe br_netfilter
-cat >/etc/sysctl.d/99-k8s.conf <<'EOF'
+cat >/etc/sysctl.d/99-k8s.conf <<EOF
 net.bridge.bridge-nf-call-iptables  = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 net.ipv4.ip_forward                 = 1
+# Raise inotify limits (configurable). The kernel default max_user_instances
+# (128) is far too low for busy nodes: kubelet/containerd and log watchers
+# exhaust it, which makes "kubectl logs" return nothing and leaves pods stuck
+# not-Ready / CrashLoopBackOff with "too many open files".
+fs.inotify.max_user_instances       = ${INOTIFY_MAX_USER_INSTANCES:-8192}
+fs.inotify.max_user_watches         = ${INOTIFY_MAX_USER_WATCHES:-1048576}
 EOF
 sysctl --system >/dev/null
 
@@ -28,14 +34,14 @@ log "installing containerd"
 if [[ "$PM" == apt ]]; then
   export DEBIAN_FRONTEND=noninteractive
   apt_update
-  apt-get install -y -qq ca-certificates curl gnupg apt-transport-https
+  apt_install ca-certificates curl gnupg apt-transport-https
   install -m 0755 -d /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
   chmod a+r /etc/apt/keyrings/docker.gpg
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release; echo $VERSION_CODENAME) stable" \
     >/etc/apt/sources.list.d/docker.list
   apt_update
-  apt-get install -y -qq containerd.io
+  apt_install containerd.io
 else
   dnf install -y -q dnf-plugins-core curl
   dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
@@ -55,14 +61,14 @@ VER="$(pkg_version)"
 if [[ "$PM" == apt ]]; then
   mkdir -p /etc/apt/keyrings
   curl -fsSL "https://pkgs.k8s.io/core:/stable:/v${K8S_MINOR}/deb/Release.key" \
-    | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    | gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
   echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${K8S_MINOR}/deb/ /" \
     >/etc/apt/sources.list.d/kubernetes.list
   apt_update
   if [[ -n "$VER" ]]; then
-    apt-get install -y -qq --allow-change-held-packages kubelet="$VER" kubeadm="$VER" kubectl="$VER"
+    apt_install --allow-change-held-packages kubelet="$VER" kubeadm="$VER" kubectl="$VER"
   else
-    apt-get install -y -qq kubelet kubeadm kubectl
+    apt_install kubelet kubeadm kubectl
   fi
   apt-mark hold kubelet kubeadm kubectl >/dev/null
 else
@@ -86,7 +92,7 @@ systemctl enable kubelet >/dev/null
 # open-iscsi is required by Longhorn — install now so workers are ready.
 log "installing open-iscsi + nfs client (needed by Longhorn)"
 if [[ "$PM" == apt ]]; then
-  apt-get install -y -qq open-iscsi nfs-common
+  apt_install open-iscsi nfs-common
 else
   dnf install -y -q iscsi-initiator-utils nfs-utils
 fi

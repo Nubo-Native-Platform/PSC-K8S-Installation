@@ -19,6 +19,43 @@ Both use the **same engine** (`k8s.sh`), so you can mix them.
 
 ---
 
+## Quickstart (easy mode — new to Kubernetes?)
+
+Three steps. Copy the inventory, add your servers + S3 details, run one command.
+Backups and disaster recovery are set up for you; there's **nothing to memorize**.
+
+```bash
+# 1. describe your cluster (copy the sample, edit IPs + S3 creds; keep it private)
+cp prod1-cluster.conf prod1-cluster.local.conf
+#    edit prod1-cluster.local.conf: node IPs, and add VELERO_BUCKET / AWS_REGION /
+#    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for backups.
+
+# 2. build everything (cluster + storage + daily S3 backups + DR bundle)
+./deploy.sh -i prod1-cluster.local.conf check     # verify it can reach your servers
+./deploy.sh -i prod1-cluster.local.conf           # build it all
+
+# 3. that's it. Your kubeconfig is saved locally as ./kubeconfig
+KUBECONFIG=./kubeconfig kubectl get nodes
+```
+
+**Backups** run daily to S3 automatically (Velero + NFS + OpenBao), keeping the
+newest 4. **To recover after losing everything**, you only need your **AWS login**:
+
+```bash
+# list what you can restore
+./deploy.sh -i prod1-cluster.local.conf backups
+# rebuild fresh servers, run step 2 again, then restore your apps:
+./deploy.sh -i prod1-cluster.local.conf restore <backup-name>
+```
+
+The recovery keys are stored for you in S3 (`dr-bundle/`). **Advanced users** who
+want those keys passphrase-encrypted (so a bucket read can't expose them) set
+`DR_ENCRYPT=true` — see [Backups to S3](#backups-to-s3-velero--raw-nfs-sync) and
+[docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md). Everything below is the
+detailed/advanced reference.
+
+---
+
 ## Table of contents
 - [What this can do](#what-this-can-do)
 - [How it works](#how-it-works)
@@ -30,6 +67,10 @@ Both use the **same engine** (`k8s.sh`), so you can mix them.
 - [Adding worker nodes later](#adding-worker-nodes-later)
 - [Storage (Longhorn or NFS)](#storage-longhorn-or-nfs)
 - [Load balancer for HA (control-plane endpoint)](#load-balancer-for-ha-control-plane-endpoint)
+- [Knative (Serving + Eventing) on Istio](#knative-serving--eventing-on-istio)
+- [Argo CD (GitOps)](#argo-cd-gitops)
+- [OpenBao (secret manager)](#openbao-secret-manager)
+- [Backups to S3 (Velero + raw NFS sync)](#backups-to-s3-velero--raw-nfs-sync)
 - [Upgrading](#upgrading)
 - [Tear down / reset](#tear-down--reset)
 - [Configuration reference](#configuration-reference)
@@ -54,7 +95,8 @@ Both use the **same engine** (`k8s.sh`), so you can mix them.
   command; or the orchestrator joins them all for you.
 - **Pre-installs everything Kubernetes needs** — container runtime
   (containerd, correctly configured), kernel modules, sysctl networking, swap
-  off, CNI network plugin (Flannel or Calico), and iSCSI/NFS clients.
+  off, raised inotify limits (so logs show and pods stay Ready under load), CNI
+  network plugin (Flannel or Calico), and iSCSI/NFS clients.
 - **Storage class out of the box** — choose **Longhorn** (distributed
   replicated block storage on the nodes) or **NFS** (dynamic PVCs from an
   external NFS server) and it's set as the default `StorageClass`.
@@ -224,7 +266,18 @@ credentials and is git-ignored — keep it safe.)
 ./deploy.sh -i staging.conf     # use a different inventory file
 ./deploy.sh bootstrap           # install SSH keys + passwordless sudo (from passwords)
 ./deploy.sh provision           # set up the LB and/or NFS server only
+./deploy.sh add-worker w6 IP    # join ONE new worker to the existing cluster
+./deploy.sh remove-worker NODE  # drain + remove a worker from the cluster
 ./deploy.sh storage             # (re)install storage only
+./deploy.sh metrics             # install metrics-server (HPA + kubectl top)
+./deploy.sh vpa                 # install the Vertical Pod Autoscaler
+./deploy.sh prometheus          # install Prometheus (no Grafana)
+./deploy.sh velero              # install Velero, back up cluster + PV data to S3
+./deploy.sh nfs-s3-sync         # CronJob: sync the raw NFS export to S3
+./deploy.sh backup-alerts       # Prometheus alerts if backups stop succeeding
+./deploy.sh knative             # install Knative (Serving/Eventing) on Istio
+./deploy.sh argocd              # install Argo CD (GitOps)
+./deploy.sh openbao             # install OpenBao (HA Raft secret manager)
 ./deploy.sh kubeconfig          # fetch admin kubeconfig to ./kubeconfig
 ./deploy.sh upgrade 1.37.0      # rolling upgrade the whole cluster
 ./deploy.sh reset               # tear the cluster down
@@ -342,10 +395,20 @@ failure. (Cloud users: use a managed L4 load balancer instead.)
 
 ## Adding worker nodes later
 
-**Orchestrated:** add the node under `[workers]` in `inventory.conf`, then:
+You can grow the cluster any time. Do **not** re-run the full `./deploy.sh` to add
+a node — that re-runs `kubeadm init` on the first master. Use the targeted
+`add-worker` action, which only touches the new node.
+
+**Orchestrated (recommended):** from your machine, one command per new node:
 ```bash
-./deploy.sh              # existing nodes are already joined; new ones get joined
+./deploy.sh add-worker worker6 10.0.0.26            # key-based access already set up
+./deploy.sh add-worker worker6 10.0.0.26 's3cret'   # or bootstrap it with a password
 ```
+It mints a fresh join token on the first master, preps the new node (containerd,
+kube tools, NFS client), and joins it as a worker. Optionally also add the node
+under `[workers]` in your inventory to keep the file accurate for future
+upgrades. Extra nodes automatically get NFS storage (they mount the same NFS
+StorageClass) — no storage step needed.
 
 **Manual / one-liner:** join tokens expire after ~24h, so mint a fresh one on a
 master:
@@ -356,6 +419,26 @@ Then on the new worker:
 ```bash
 curl -sfL https://YOUR_HOST/k8s.sh | sudo JOIN="kubeadm join ..." bash -s -- join
 ```
+
+> Adding an extra **control-plane** node (master) is also possible but needs the
+> upload-certs certificate key and your LB to include it; that's an advanced,
+> less-common operation — open an issue if you need a scripted path for it.
+
+### Removing a worker
+
+To retire a node safely (evict its pods first, then remove it):
+```bash
+./deploy.sh remove-worker <node-name>          # drain + delete from the cluster
+./deploy.sh remove-worker <node-name> 10.0.0.26 # also 'kubeadm reset' the machine
+```
+`<node-name>` is the Kubernetes node name shown by `kubectl get nodes` (the
+host's hostname, e.g. `prod1-k8s-worker6`). It cordons and drains the node
+(`--ignore-daemonsets --delete-emptydir-data`), deletes it from the API, and —
+if you pass the IP — resets kubeadm on the machine so it's clean for reuse. You
+are asked to confirm by typing the node name.
+
+> Any PVCs whose pods were on that node re-attach elsewhere automatically because
+> the data lives on the NFS server, not the node.
 
 ---
 
@@ -399,6 +482,24 @@ sudo NFS_CIDR=192.168.18.0/24 ./scripts/nfs-server-setup.sh
 # installs nfs-kernel-server, creates /srv/nfs/k8s, exports it to the network,
 # and opens the firewall.
 ```
+> **Hardened export.** The export uses `root_squash,all_squash` (every client
+> UID, including root, maps to `nobody`) and the export root is `0755` owned by
+> `nobody` — so a compromised client can't act as root on the server and nothing
+> is world-writable, while dynamic provisioning still works for root and
+> non-root pods. It's also restricted to `NFS_CIDR`. Override with `NFS_OPTS`.
+
+> **Accidental-deletion protection.** By default `NFS_ARCHIVE_ON_DELETE=true`, so
+> deleting a PVC does **not** wipe its data — the provisioner renames the folder
+> to `archived-<ns>-<pvc>-<pv>` on the NFS server, and you can restore it. Set it
+> to `false` only if you want a PVC delete to hard-remove data. (This does not
+> protect against deleting the whole NFS export — keep backups of the server, and
+> use RBAC to limit who can delete PVCs.)
+>
+> To stop archives growing forever, a **retention CronJob** keeps only the last
+> `NFS_ARCHIVE_RETENTION` archived copies **per PVC** (default 3) and prunes older
+> ones on `NFS_ARCHIVE_PRUNE_SCHEDULE` (default daily) — so you always have a
+> recovery window without unbounded storage. Set `NFS_ARCHIVE_RETENTION=0` to keep
+> everything.
 
 **2) Point the cluster at it.** Orchestrated — in your inventory:
 ```ini
@@ -432,6 +533,181 @@ spec:
 EOF
 kubectl get pvc test-pvc      # should become Bound (uses the default StorageClass)
 ```
+
+---
+
+## Knative (Serving + Eventing) on Istio
+
+Run serverless, request-driven workloads (scale-to-zero autoscaling) with
+[Knative](https://knative.dev), using **Istio** as the networking layer — which
+also gives you a working **service mesh with sidecar injection**.
+
+Install it (from your machine, after the cluster is up):
+```bash
+./deploy.sh knative            # or set KNATIVE=true in the inventory to include it in install
+```
+This installs Istio (`istioctl`), sets the ingress gateway to **NodePort**,
+installs Knative Serving + the `net-istio` layer, enables Istio sidecar injection
+on `knative-serving` (PERMISSIVE mTLS), points the domain at
+`<KNATIVE_DOMAIN_IP>.sslip.io` (Magic DNS), and — with `KNATIVE_EVENTING=true` —
+installs Knative Eventing (brokers, triggers, in-memory channel). Versions are
+pinned (`ISTIO_VERSION`, `KNATIVE_VERSION`).
+
+Deploy a service and call it through the gateway NodePort:
+```bash
+kubectl apply -f - <<'EOF'
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata: { name: hello }
+spec:
+  template:
+    spec:
+      containers:
+        - image: gcr.io/knative-samples/helloworld-go
+          env: [{ name: TARGET, value: "World" }]
+EOF
+URL=$(kubectl get ksvc hello -o jsonpath='{.status.url}')     # http://hello.default.<ip>.sslip.io
+NP=$(kubectl -n istio-system get svc istio-ingressgateway -o jsonpath='{.spec.ports[?(@.port==80)].nodePort}')
+curl -H "Host: ${URL#http://}" http://<any-node-ip>:$NP        # -> Hello World!
+```
+
+**Sidecar injection.** To put an app's pods into the mesh, label the namespace
+and add the inject annotation to the Knative Service:
+```bash
+kubectl label namespace myns istio-injection=enabled
+```
+```yaml
+spec:
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/inject: "true"
+```
+On Istio 1.31 the proxy is a **native sidecar** (an always-on init container), so
+an injected Knative pod runs `user-container` + `queue-proxy` with `istio-init` +
+`istio-proxy`, showing as `3/3` Ready.
+
+> NodePort needs no load balancer. For real external IPs (a `LoadBalancer`
+> gateway), install MetalLB and set `KNATIVE_INGRESS_TYPE=LoadBalancer`.
+
+---
+
+## Argo CD (GitOps)
+
+Install [Argo CD](https://argo-cd.readthedocs.io) for GitOps-style continuous
+delivery (declaratively sync apps from Git):
+```bash
+./deploy.sh argocd             # or set ARGOCD=true in the inventory
+```
+It installs Argo CD (pinned `ARGOCD_VERSION`) into the `argocd` namespace using
+**server-side apply** (its CRDs exceed the client-side apply size limit), exposes
+the server via `ARGOCD_INGRESS_TYPE` (NodePort by default), waits for it to be
+ready, and prints the initial `admin` password.
+
+Access it:
+```bash
+NP=$(kubectl -n argocd get svc argocd-server -o jsonpath='{.spec.ports[?(@.port==443)].nodePort}')
+# open https://<any-node-ip>:$NP  (self-signed TLS), user: admin
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
+```
+Change the admin password and delete `argocd-initial-admin-secret` after first
+login.
+
+---
+
+## OpenBao (secret manager)
+
+[OpenBao](https://openbao.org) is the open-source (Linux Foundation) fork of
+Vault. This installs it as an **HA cluster with Integrated Storage (Raft, 3
+replicas)** and initializes + unseals it:
+```bash
+./deploy.sh openbao            # or set OPENBAO=true in the inventory
+```
+It installs Helm if needed, deploys the pinned OpenBao chart, waits for the
+pods, then **initializes** `openbao-0`, **unseals** it, and **joins + unseals**
+the other replicas. The unseal keys and root token are written to
+`/root/openbao-init.json` on the first master (root-only).
+
+Use it:
+```bash
+kubectl -n openbao port-forward svc/openbao 8200:8200 &
+export BAO_ADDR=http://127.0.0.1:8200
+bao login <root-token>        # from /root/openbao-init.json
+bao secrets enable -path=secret kv-v2
+bao kv put secret/demo hello=world && bao kv get secret/demo
+```
+
+> **Security:** move `openbao-init.json` out of the node into real secret storage
+> and delete it; losing the keys loses access, leaking them is full compromise.
+> There is **no auto-unseal** on bare metal (no cloud KMS), so after a pod/node
+> restart OpenBao comes up **sealed** — re-run `./deploy.sh openbao` (or unseal
+> manually with 3 keys) to unseal it.
+>
+> **Storage:** Raft uses BoltDB (mmap + file locks), which is **not recommended
+> on NFS**. For production set `OPENBAO_STORAGE_CLASS` to local/block storage.
+> The default (NFS) works for testing.
+
+---
+
+## Backups to S3 (Velero + raw NFS sync)
+
+Two complementary backups, both to **AWS S3**. Put the bucket + credentials in a
+**private `*.local.conf`** (git-ignored) — never in a committed file.
+
+**Velero** — Kubernetes-native backup of resources **and** persistent-volume data
+(via File System Backup, so NFS-backed PVCs are copied to S3):
+```bash
+./deploy.sh velero      # with VELERO=true + VELERO_BUCKET/AWS_* set in your inventory
+```
+It installs Velero + the node agent, sets an S3 backup location, and creates a
+daily schedule. Restore-tested workflow:
+```bash
+velero backup create test --wait
+velero restore create --from-backup test
+```
+
+**Raw NFS→S3 sync** — a file-level copy of the whole export, independent of
+Kubernetes:
+```bash
+./deploy.sh nfs-s3-sync # with NFS_S3_SYNC=true + NFS_S3_BUCKET/AWS_* set
+```
+Creates a CronJob that `aws s3 sync`s `/srv/nfs/k8s` to `s3://<bucket>/<prefix>/`.
+It's best-effort at the file level and **skips files it can't read** (another
+app's private 0600 data, e.g. OpenBao's raft files) — the job still succeeds. For
+those, rely on Velero or the app's own snapshot (OpenBao: `bao operator raft
+snapshot save`).
+
+> Inventory keys: `VELERO`, `VELERO_BUCKET`, `VELERO_KEEP` (default 4),
+> `VELERO_TTL` (default 30d backstop), `VELERO_EXCLUDE_NAMESPACES` (default
+> `monitoring`), `NFS_S3_SYNC`, `NFS_S3_BUCKET`, `NFS_S3_PREFIX`, `NFS_S3_KEEP`
+> (default 4), `NFS_S3_STORAGE_CLASS`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`,
+> `AWS_SECRET_ACCESS_KEY`.
+
+**Retention & cost (count-based + 30-day backstop):** a pruner always keeps the
+**newest 4 Velero** backups (`VELERO_KEEP`) and the **newest 4 NFS daily
+snapshots** (`NFS_S3_KEEP`) — so an outage can't age them away. A **30-day**
+Velero TTL / S3 lifecycle is only a backstop (clears backups if they've been
+abandoned that long). `monitoring` is excluded from Velero and `archived-*` from
+the NFS sync to cut size. Objects use `STANDARD` (cheapest for this retention —
+IA/Glacier minimum durations would cost more). Bucket has AES256 encryption +
+public access blocked.
+
+**Full restore procedures: [docs/BACKUP-RESTORE.md](docs/BACKUP-RESTORE.md)** —
+Velero (full / per-namespace / selective), raw NFS→S3 file recovery, and OpenBao
+raft snapshot restore. Easy restore from your machine:
+```bash
+./deploy.sh backups                      # list backups available in S3
+./deploy.sh restore <backup-name> [ns]   # restore everything, or one namespace
+```
+
+**Total cluster loss? [docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md)** —
+rebuild a fresh cluster and restore everything from S3 (Velero + restic +
+OpenBao snapshot), including the off-cluster keys you must keep.
+
+> Velero uses its **own bucket prefix** (`VELERO_PREFIX=velero`) so it can share
+> the bucket with the restic NFS repo (`nfs-restic/`). Velero rejects a location
+> whose root holds foreign data ("invalid top-level directory"), so never point
+> Velero at the bucket root when other tools use the same bucket.
 
 ---
 
@@ -478,12 +754,40 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `CONTROL_PLANE_ENDPOINT` | *(empty)* | VIP/LB `host:6443` — **required for HA** |
 | `POD_CIDR` | `10.244.0.0/16` | pod network range (Calico prefers `192.168.0.0/16`) |
 | `SERVICE_CIDR` | `10.96.0.0/12` | service network range |
+| `MAX_PODS` | `110` | kubelet max pods per node (keep ≤250 with a `/24` podCIDR) |
+| `INOTIFY_MAX_USER_INSTANCES` | `8192` | inotify instances/node (kernel default 128 is too low) |
+| `INOTIFY_MAX_USER_WATCHES` | `1048576` | inotify watches/node |
+| `METRICS_SERVER` | `true` | install metrics-server (needed for HPA + `kubectl top`) |
+| `VPA` | `true` | install the Vertical Pod Autoscaler (recommender/updater/admission) |
+| `VPA_VERSION` | `1.8.0` | pinned VPA release |
+| `PROMETHEUS` | `true` | install kube-prometheus-stack **without Grafana** (Prometheus/Alertmanager/node-exporter/kube-state-metrics) |
+| `PROMETHEUS_RETENTION` | `7d` | Prometheus local retention |
+| `PROMETHEUS_STORAGE_CLASS` | *(emptyDir)* | persist the TSDB on a **local/block** SC (avoid NFS); empty = ephemeral |
+| `KNATIVE` | `true` | `true` = install Knative + Istio during `./deploy.sh` |
+| `KNATIVE_EVENTING` | `true` | also install Knative Eventing (brokers/triggers) |
+| `ISTIO_VERSION` / `KNATIVE_VERSION` | `1.31.1` / `knative-v1.23.0` | pinned versions |
+| `KNATIVE_INGRESS_TYPE` | `NodePort` | `NodePort` (no LB needed) or `LoadBalancer` |
+| `KNATIVE_DOMAIN_IP` | first master | node IP for Magic DNS (`<ip>.sslip.io`) |
+| `ARGOCD` | `true` | `true` = install Argo CD (GitOps) during `./deploy.sh` |
+| `ARGOCD_VERSION` | `v3.5.3` | pinned Argo CD release |
+| `ARGOCD_INGRESS_TYPE` | `NodePort` | `NodePort`, `LoadBalancer`, or `ClusterIP` for the Argo CD server |
+| `OPENBAO` | `true` | `true` = install OpenBao (HA Raft secret manager) during `./deploy.sh` |
+| `OPENBAO_REPLICAS` | `3` | Raft voters (3 or 5) |
+| `OPENBAO_INGRESS_TYPE` | `ClusterIP` | `ClusterIP` or `NodePort` for the OpenBao service |
+| `OPENBAO_STORAGE_CLASS` | *(default SC)* | StorageClass for Raft data (use local/block for production) |
+| `VELERO` | `false` | back up cluster + PV data to S3 with Velero (needs S3 creds) |
+| `NFS_S3_SYNC` | `false` | CronJob that syncs the raw NFS export to S3 |
+| `VELERO_BUCKET` / `NFS_S3_BUCKET` | *(none)* | target S3 bucket(s) |
+| `AWS_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | *(none)* | S3 region + credentials — **keep in a private `*.local.conf`, never commit** |
 | `APISERVER_ADVERTISE_ADDRESS` | auto | which node IP the API server advertises |
 | `STORAGE` | `longhorn` | storage backend: `longhorn`, `nfs`, or `none` |
 | `LONGHORN_VERSION` | `v1.10.0` | Longhorn version (when `STORAGE=longhorn`) |
 | `NFS_SERVER` | *(empty)* | NFS server IP/host — **required when `STORAGE=nfs`** |
 | `NFS_PATH` | `/srv/nfs/k8s` | exported directory on the NFS server |
 | `NFS_SC_NAME` | `nfs-client` | StorageClass name to create (NFS) |
+| `NFS_ARCHIVE_ON_DELETE` | `true` | on PVC delete, **archive** (rename) the data instead of wiping it — protects against accidental deletion |
+| `NFS_ARCHIVE_RETENTION` | `3` | keep only the last N archived copies per PVC (a CronJob prunes older); `0` = keep all |
+| `NFS_ARCHIVE_PRUNE_SCHEDULE` | `0 2 * * *` | cron schedule for the archive-retention job |
 | `NFS_SETUP` | `false` | `true` = `deploy.sh` sets up the NFS server on `NFS_SERVER` automatically |
 | `NFS_CIDR` | auto | network allowed to mount the NFS export (e.g. `192.168.18.0/24`) |
 | `NFS_SSH_USER` | `SSH_USER` | SSH user for the NFS host (if different) |
@@ -514,6 +818,15 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `scripts/04b-storage-nfs.sh` | modular: install NFS provisioner + StorageClass |
 | `scripts/nfs-server-setup.sh` | set up the external NFS server (run on the file server) |
 | `scripts/lb-haproxy-setup.sh` | stand up an HAProxy control-plane LB for HA |
+| `scripts/09-metrics-server.sh` | install metrics-server (HPA + `kubectl top`) |
+| `scripts/10-vpa.sh` | install the Vertical Pod Autoscaler |
+| `scripts/11-prometheus.sh` | install Prometheus (kube-prometheus-stack, no Grafana) |
+| `scripts/12-velero.sh` | install Velero and back up the cluster + PV data to AWS S3 |
+| `scripts/13-nfs-s3-sync.sh` | CronJob that syncs the raw NFS export to S3 |
+| `scripts/14-backup-alerts.sh` | Prometheus alerts + Velero ServiceMonitor for backup failures |
+| `scripts/06-knative-istio.sh` | install Knative (Serving/Eventing) on Istio + sidecar injection |
+| `scripts/07-argocd.sh` | install Argo CD (GitOps continuous delivery) |
+| `scripts/08-openbao.sh` | install OpenBao (HA Raft secret manager) + init/unseal |
 | `scripts/05-upgrade.sh` | modular: per-node upgrade |
 | `scripts/list-versions.sh` | list installable Kubernetes versions |
 | `scripts/lib.sh` / `config/cluster.env` | shared helpers / config for the modular scripts |
@@ -530,6 +843,7 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | Worker join fails “token expired” | run `sudo bash k8s.sh token` on a master for a fresh command |
 | `swap` / preflight errors | prep disables swap; re-run `k8s.sh` prep, or check `/etc/fstab` |
 | Longhorn PVC stuck `Pending` | ensure `open-iscsi`/`iscsid` is running on every node (prep installs it) |
+| `kubectl logs` empty / pods stuck not-Ready with "too many open files" | inotify exhaustion — prep raises `fs.inotify.max_user_instances` to 8192 (kernel default 128 is too low). On an already-running node: `sudo sysctl -w fs.inotify.max_user_instances=8192 fs.inotify.max_user_watches=524288` |
 | `kubectl` from laptop | `scp master:/etc/kubernetes/admin.conf ~/.kube/config` then edit the server IP |
 
 Useful checks:

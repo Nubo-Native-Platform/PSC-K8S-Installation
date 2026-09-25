@@ -24,4 +24,5 @@ Regenerate on a master with:
   kubeadm token create --print-join-command"
 fi
 
+apply_max_pods
 log "joined. From a master run: kubectl get nodes -o wide"

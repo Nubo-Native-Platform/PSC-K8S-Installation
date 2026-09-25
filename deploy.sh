@@ -8,6 +8,11 @@
 #    ./deploy.sh check           # test SSH + sudo to every node
 #    ./deploy.sh bootstrap       # only install SSH keys + passwordless sudo
 #    ./deploy.sh provision       # only set up the LB and/or NFS server
+#    ./deploy.sh knative         # install Knative (Serving/Eventing) on Istio
+#    ./deploy.sh argocd          # install Argo CD (GitOps)
+#    ./deploy.sh openbao         # install OpenBao (HA Raft secret manager)
+#    ./deploy.sh add-worker w6 10.0.0.26 [pw]   # join ONE new worker later
+#    ./deploy.sh remove-worker prod1-...-w6 [ip] # drain + remove a worker
 #    ./deploy.sh storage         # (re)install storage (Longhorn or NFS) only
 #    ./deploy.sh kubeconfig      # fetch admin kubeconfig to ./kubeconfig
 #    ./deploy.sh upgrade 1.37.0  # rolling upgrade of the whole cluster
@@ -76,6 +81,9 @@ case "$K8S_MINOR" in
 esac
 CNI="${SET[CNI]:-flannel}"; POD_CIDR="${SET[POD_CIDR]:-10.244.0.0/16}"
 CPE="${SET[CONTROL_PLANE_ENDPOINT]:-}"
+MAX_PODS="${SET[MAX_PODS]:-110}"       # kubelet maxPods per node (<=250 with a /24 podCIDR)
+INOTIFY_MAX_USER_INSTANCES="${SET[INOTIFY_MAX_USER_INSTANCES]:-8192}"
+INOTIFY_MAX_USER_WATCHES="${SET[INOTIFY_MAX_USER_WATCHES]:-1048576}"
 
 # ---- storage backend: longhorn | nfs | none --------------------------------
 # Back-compat: honour a legacy LONGHORN=true/false if STORAGE is not set.
@@ -86,6 +94,9 @@ fi
 LONGHORN_VERSION="${SET[LONGHORN_VERSION]:-v1.10.0}"
 NFS_SERVER="${SET[NFS_SERVER]:-}"; NFS_PATH="${SET[NFS_PATH]:-/srv/nfs/k8s}"
 NFS_SC_NAME="${SET[NFS_SC_NAME]:-nfs-client}"
+NFS_ARCHIVE_ON_DELETE="${SET[NFS_ARCHIVE_ON_DELETE]:-true}"   # keep data on accidental PVC delete
+NFS_ARCHIVE_RETENTION="${SET[NFS_ARCHIVE_RETENTION]:-3}"      # keep last N archived copies per PVC (0=all)
+NFS_ARCHIVE_PRUNE_SCHEDULE="${SET[NFS_ARCHIVE_PRUNE_SCHEDULE]:-0 2 * * *}"
 [[ "$STORAGE" == nfs && -z "$NFS_SERVER" ]] && die "STORAGE=nfs — set NFS_SERVER (NFS server IP) in inventory.conf"
 
 # Fetch the admin kubeconfig to this machine at the end of install? (true|false)
@@ -104,6 +115,58 @@ NFS_CIDR="${SET[NFS_CIDR]:-}"
 # from the 3rd inventory column). BOOTSTRAP=auto runs it only if any password is set.
 LB_PASSWORD="${SET[LB_PASSWORD]:-}"; NFS_PASSWORD="${SET[NFS_PASSWORD]:-}"
 BOOTSTRAP="${SET[BOOTSTRAP]:-auto}"    # auto | true | false
+
+# ---- Autoscaling prerequisites ---------------------------------------------
+METRICS_SERVER="${SET[METRICS_SERVER]:-true}"    # HPA + kubectl top (default on)
+METRICS_SERVER_VERSION="${SET[METRICS_SERVER_VERSION]:-latest}"
+VPA="${SET[VPA]:-true}"                           # Vertical Pod Autoscaler (default on)
+VPA_VERSION="${SET[VPA_VERSION]:-1.8.0}"
+
+# ---- Monitoring: Prometheus (no Grafana) -----------------------------------
+PROMETHEUS="${SET[PROMETHEUS]:-true}"
+PROMETHEUS_RETENTION="${SET[PROMETHEUS_RETENTION]:-7d}"
+PROMETHEUS_STORAGE_CLASS="${SET[PROMETHEUS_STORAGE_CLASS]:-}"
+BACKUP_ALERTS="${SET[BACKUP_ALERTS]:-true}"      # Prometheus alerts if backups stop
+
+# ---- Backups to S3 (need S3 creds; keep those in a private *.local.conf) ----
+VELERO="${SET[VELERO]:-false}"                 # Velero -> S3 (cluster + PV data)
+NFS_S3_SYNC="${SET[NFS_S3_SYNC]:-false}"       # raw NFS export -> S3 CronJob
+VELERO_BUCKET="${SET[VELERO_BUCKET]:-}"
+VELERO_PREFIX="${SET[VELERO_PREFIX]:-velero}"                   # Velero's own bucket prefix (must not share root with restic)
+VELERO_KEEP="${SET[VELERO_KEEP]:-4}"                            # always keep newest 4 (count)
+VELERO_TTL="${SET[VELERO_TTL]:-720h0m0s}"                       # 30d backstop only
+VELERO_EXCLUDE_NAMESPACES="${SET[VELERO_EXCLUDE_NAMESPACES]:-monitoring}"
+NFS_S3_BUCKET="${SET[NFS_S3_BUCKET]:-}"; NFS_S3_PREFIX="${SET[NFS_S3_PREFIX]:-nfs-restic}"
+NFS_S3_STORAGE_CLASS="${SET[NFS_S3_STORAGE_CLASS]:-STANDARD}"
+NFS_S3_KEEP="${SET[NFS_S3_KEEP]:-4}"                            # always keep newest 4 daily snapshots
+AWS_REGION="${SET[AWS_REGION]:-}"
+AWS_ACCESS_KEY_ID="${SET[AWS_ACCESS_KEY_ID]:-}"; AWS_SECRET_ACCESS_KEY="${SET[AWS_SECRET_ACCESS_KEY]:-}"
+# Automated OpenBao raft snapshot -> S3 (no passphrase needed; on by default when
+# OpenBao + S3 are configured). And the encrypted DR key-bundle (needs a passphrase).
+OPENBAO_SNAPSHOT="${SET[OPENBAO_SNAPSHOT]:-true}"
+BAO_SNAP_SCHEDULE="${SET[BAO_SNAP_SCHEDULE]:-0 2 * * *}"; BAO_SNAP_KEEP="${SET[BAO_SNAP_KEEP]:-4}"
+DR_BUNDLE="${SET[DR_BUNDLE]:-true}"            # store the DR key bundle in S3 (easy mode: plain, nothing to remember)
+DR_ENCRYPT="${SET[DR_ENCRYPT]:-false}"         # advanced: true = passphrase-encrypt the bundle (you keep the passphrase)
+DR_PASSPHRASE="${DR_PASSPHRASE:-}"             # env only (never inventory); prompted if DR_ENCRYPT and empty
+
+# ---- Knative + Istio (optional) --------------------------------------------
+KNATIVE="${SET[KNATIVE]:-true}"                  # installed by default; set false to skip
+KNATIVE_EVENTING="${SET[KNATIVE_EVENTING]:-true}"
+ISTIO_VERSION="${SET[ISTIO_VERSION]:-1.31.1}"
+KNATIVE_VERSION="${SET[KNATIVE_VERSION]:-knative-v1.23.0}"
+KNATIVE_INGRESS_TYPE="${SET[KNATIVE_INGRESS_TYPE]:-NodePort}"
+KNATIVE_DOMAIN_IP="${SET[KNATIVE_DOMAIN_IP]:-${M_IP[0]}}"
+
+# ---- Argo CD (optional) ----------------------------------------------------
+ARGOCD="${SET[ARGOCD]:-true}"                    # installed by default; set false to skip
+ARGOCD_VERSION="${SET[ARGOCD_VERSION]:-v3.5.3}"
+ARGOCD_INGRESS_TYPE="${SET[ARGOCD_INGRESS_TYPE]:-NodePort}"
+
+# ---- OpenBao secret manager (optional) -------------------------------------
+OPENBAO="${SET[OPENBAO]:-true}"                  # installed by default; set false to skip
+OPENBAO_REPLICAS="${SET[OPENBAO_REPLICAS]:-3}"
+OPENBAO_INGRESS_TYPE="${SET[OPENBAO_INGRESS_TYPE]:-ClusterIP}"
+OPENBAO_STORAGE_CLASS="${SET[OPENBAO_STORAGE_CLASS]:-}"
 
 # HA auto-detect
 if [[ ${#MASTERS[@]} -gt 1 ]]; then
@@ -185,12 +248,12 @@ want_bootstrap(){
 
 # common env prefix passed into k8s.sh on the remote node
 envstr(){
-  echo "K8S_MINOR='$K8S_MINOR' K8S_PATCH='$K8S_PATCH' CNI='$CNI' HA_MODE='$HA_MODE' POD_CIDR='$POD_CIDR' CONTROL_PLANE_ENDPOINT='$CPE'"
+  echo "K8S_MINOR='$K8S_MINOR' K8S_PATCH='$K8S_PATCH' CNI='$CNI' HA_MODE='$HA_MODE' POD_CIDR='$POD_CIDR' CONTROL_PLANE_ENDPOINT='$CPE' MAX_PODS='$MAX_PODS' INOTIFY_MAX_USER_INSTANCES='$INOTIFY_MAX_USER_INSTANCES' INOTIFY_MAX_USER_WATCHES='$INOTIFY_MAX_USER_WATCHES'"
 }
 
 # env prefix for the storage step (Longhorn or NFS provisioner)
 storage_envstr(){
-  echo "STORAGE='$STORAGE' LONGHORN_VERSION='$LONGHORN_VERSION' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' NFS_SC_NAME='$NFS_SC_NAME'"
+  echo "STORAGE='$STORAGE' LONGHORN_VERSION='$LONGHORN_VERSION' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' NFS_SC_NAME='$NFS_SC_NAME' NFS_ARCHIVE_ON_DELETE='$NFS_ARCHIVE_ON_DELETE' NFS_ARCHIVE_RETENTION='$NFS_ARCHIVE_RETENTION' NFS_ARCHIVE_PRUNE_SCHEDULE='$NFS_ARCHIVE_PRUNE_SCHEDULE'"
 }
 
 print_plan(){
@@ -261,6 +324,18 @@ cmd_install(){
   fi
 
   step "DONE"; rsh "$M0" "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide" || true
+  [[ "$METRICS_SERVER" == true ]] && cmd_metrics
+  [[ "$VPA" == true ]] && cmd_vpa
+  [[ "$PROMETHEUS" == true ]] && cmd_prometheus
+  [[ "$KNATIVE" == true ]] && cmd_knative
+  [[ "$ARGOCD" == true ]] && cmd_argocd
+  [[ "$OPENBAO" == true ]] && cmd_openbao
+  [[ "$VELERO" == true ]] && cmd_velero
+  [[ "$NFS_S3_SYNC" == true ]] && cmd_nfs_s3
+  [[ "$BACKUP_ALERTS" == true && "$PROMETHEUS" == true ]] && cmd_backup_alerts
+  # DR protection: auto OpenBao snapshot + accept-to-store encrypted key bundle.
+  cmd_dr_protect
+
   if [[ "$FETCH_KUBECONFIG" == true ]]; then
     fetch_kubeconfig
   else
@@ -285,6 +360,209 @@ fetch_kubeconfig(){
 }
 
 cmd_storage(){ push "${M_IP[0]}"; rsh "${M_IP[0]}" "sudo $(storage_envstr) bash /tmp/k8s.sh storage"; }
+
+knative_envstr(){
+  echo "ISTIO_VERSION='$ISTIO_VERSION' KNATIVE_VERSION='$KNATIVE_VERSION' KNATIVE_EVENTING='$KNATIVE_EVENTING' KNATIVE_INGRESS_TYPE='$KNATIVE_INGRESS_TYPE' KNATIVE_DOMAIN_IP='$KNATIVE_DOMAIN_IP'"
+}
+
+# Install metrics-server (HPA + kubectl top), via the first master.
+cmd_metrics(){
+  [[ -f "$HERE/scripts/09-metrics-server.sh" ]] || die "scripts/09-metrics-server.sh not found"
+  local M0="${M_IP[0]}"; step "installing metrics-server (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/09-metrics-server.sh"
+  rsh "$M0" "sudo METRICS_SERVER_VERSION='$METRICS_SERVER_VERSION' bash /tmp/09-metrics-server.sh"
+}
+
+# Install Prometheus (no Grafana), via the first master.
+cmd_prometheus(){
+  [[ -f "$HERE/scripts/11-prometheus.sh" ]] || die "scripts/11-prometheus.sh not found"
+  local M0="${M_IP[0]}"; step "installing Prometheus (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/11-prometheus.sh"
+  rsh "$M0" "sudo PROMETHEUS_RETENTION='$PROMETHEUS_RETENTION' PROMETHEUS_STORAGE_CLASS='$PROMETHEUS_STORAGE_CLASS' bash /tmp/11-prometheus.sh"
+}
+
+# Install the Vertical Pod Autoscaler, via the first master.
+cmd_vpa(){
+  [[ -f "$HERE/scripts/10-vpa.sh" ]] || die "scripts/10-vpa.sh not found"
+  local M0="${M_IP[0]}"; step "installing VPA (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/10-vpa.sh"
+  rsh "$M0" "sudo VPA_VERSION='$VPA_VERSION' bash /tmp/10-vpa.sh"
+}
+
+# Install Velero (backup to S3), via the first master.
+cmd_velero(){
+  [[ -f "$HERE/scripts/12-velero.sh" ]] || die "scripts/12-velero.sh not found"
+  [[ -n "$VELERO_BUCKET" && -n "$AWS_REGION" && -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] \
+    || die "Velero needs VELERO_BUCKET, AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (put them in a private *.local.conf)"
+  local M0="${M_IP[0]}"; step "installing Velero (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/12-velero.sh"
+  rsh "$M0" "sudo VELERO_BUCKET='$VELERO_BUCKET' VELERO_PREFIX='$VELERO_PREFIX' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' VELERO_KEEP='$VELERO_KEEP' VELERO_TTL='$VELERO_TTL' VELERO_EXCLUDE_NAMESPACES='$VELERO_EXCLUDE_NAMESPACES' bash /tmp/12-velero.sh"
+}
+
+# Install the raw NFS-export -> S3 sync CronJob, via the first master.
+cmd_nfs_s3(){
+  [[ -f "$HERE/scripts/13-nfs-s3-sync.sh" ]] || die "scripts/13-nfs-s3-sync.sh not found"
+  [[ -n "$NFS_S3_BUCKET" && -n "$AWS_REGION" && -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" && -n "$NFS_SERVER" ]] \
+    || die "NFS->S3 needs NFS_S3_BUCKET, AWS_REGION, AWS creds, and NFS_SERVER"
+  local M0="${M_IP[0]}"; step "installing NFS->S3 sync (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/13-nfs-s3-sync.sh"
+  rsh "$M0" "sudo NFS_S3_BUCKET='$NFS_S3_BUCKET' NFS_S3_PREFIX='$NFS_S3_PREFIX' NFS_S3_STORAGE_CLASS='$NFS_S3_STORAGE_CLASS' NFS_S3_KEEP='$NFS_S3_KEEP' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' bash /tmp/13-nfs-s3-sync.sh"
+}
+
+# Install the automated OpenBao raft-snapshot -> S3 CronJob (no passphrase needed).
+cmd_openbao_snapshot(){
+  [[ -f "$HERE/scripts/16-openbao-snapshot.sh" ]] || die "scripts/16-openbao-snapshot.sh not found"
+  local bucket="${VELERO_BUCKET:-$NFS_S3_BUCKET}"
+  [[ -n "$bucket" && -n "$AWS_REGION" && -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] \
+    || die "OpenBao snapshot needs a bucket (VELERO_BUCKET/NFS_S3_BUCKET), AWS_REGION and AWS creds"
+  local M0="${M_IP[0]}"; step "installing automated OpenBao snapshot -> s3://$bucket/openbao (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/16-openbao-snapshot.sh"
+  rsh "$M0" "sudo BAO_SNAP_BUCKET='$bucket' BAO_SNAP_PREFIX='openbao' BAO_SNAP_SCHEDULE='$BAO_SNAP_SCHEDULE' BAO_SNAP_KEEP='$BAO_SNAP_KEEP' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' bash /tmp/16-openbao-snapshot.sh"
+}
+
+# DR-protection run at the end of install. Sets up the automated OpenBao snapshot
+# (no passphrase) and — by default (easy mode) — stores the DR key bundle in S3 so
+# recovery needs nothing but an AWS login. With DR_ENCRYPT=true it becomes the
+# advanced, passphrase-encrypted bundle (asks you to accept + own a passphrase).
+# Skipped automatically if S3 isn't configured.
+cmd_dr_protect(){
+  local bucket="${VELERO_BUCKET:-$NFS_S3_BUCKET}"
+  [[ -n "$bucket" && -n "$AWS_REGION" && -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] || {
+    warn "S3 not configured — skipping DR protection (run './deploy.sh openbao-snapshot' and './deploy.sh dr-bundle' later)"; return 0; }
+  # 1. OpenBao snapshot: automatic, no passphrase.
+  if [[ "$OPENBAO" == true && "$OPENBAO_SNAPSHOT" == true ]]; then cmd_openbao_snapshot || warn "openbao snapshot setup had issues"; fi
+  # 2. DR key bundle.
+  [[ "$DR_BUNDLE" == true ]] || { log "DR key bundle disabled. Store it any time: ./deploy.sh -i <inv> dr-bundle"; return 0; }
+  if [[ "$DR_ENCRYPT" == true ]]; then
+    echo; step "DR key bundle (encrypted)"
+    cat <<EOF
+Stores your recovery KEYS in S3, encrypted with a passphrase you choose.
+At recovery you need TWO things kept OFF the cluster:
+  1) your AWS login    2) THIS passphrase (store it in a password manager)
+If you lose the passphrase, this bundle cannot be recovered.
+EOF
+    local ans=""
+    if [[ -n "$DR_PASSPHRASE" ]]; then ans=y; else read -rp "Create the encrypted DR bundle now? [Y/n] " ans; ans="${ans:-y}"; fi
+    [[ "$ans" =~ ^[Yy]$ ]] && cmd_dr_bundle || warn "skipped. Later:  DR_ENCRYPT=true ./deploy.sh -i <inv> dr-bundle"
+  else
+    # Easy mode: store the bundle in S3 automatically, nothing to remember.
+    step "DR key bundle (easy mode — stored in S3, recovery needs only your AWS login)"
+    cmd_dr_bundle
+  fi
+}
+
+# Build + upload the DR "break-glass" bundle (keys + inventory + runbook) to S3.
+# Easy mode (default): plain, protected by the bucket's encryption + private access
+# (recovery needs only the AWS login). DR_ENCRYPT=true: passphrase-encrypted.
+cmd_dr_bundle(){
+  [[ -f "$HERE/scripts/15-dr-bundle.sh" ]] || die "scripts/15-dr-bundle.sh not found"
+  local bucket="${VELERO_BUCKET:-$NFS_S3_BUCKET}"
+  [[ -n "$bucket" && -n "$AWS_REGION" && -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] \
+    || die "DR bundle needs a bucket (VELERO_BUCKET/NFS_S3_BUCKET), AWS_REGION and AWS creds (put them in a private *.local.conf)"
+  local pp="${DR_PASSPHRASE:-}"
+  if [[ "$DR_ENCRYPT" == true && -z "$pp" ]]; then
+    read -rsp "DR bundle passphrase (keep this OFF-cluster; you need it to recover): " pp; echo
+    local pp2; read -rsp "Confirm passphrase: " pp2; echo
+    [[ "$pp" == "$pp2" ]] || die "passphrases did not match"
+    [[ -n "$pp" ]] || die "empty passphrase"
+  fi
+  local M0="${M_IP[0]}"; step "building DR bundle (encrypt=$DR_ENCRYPT) -> s3://$bucket/dr-bundle (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/15-dr-bundle.sh"
+  push_as "$SSH_USER" "$M0" "$INV"
+  [[ -f "$HERE/docs/DISASTER-RECOVERY.md" ]] && push_as "$SSH_USER" "$M0" "$HERE/docs/DISASTER-RECOVERY.md"
+  rsh "$M0" "sudo DR_BUCKET='$bucket' DR_PREFIX='dr-bundle' DR_ENCRYPT='$DR_ENCRYPT' VELERO_PREFIX='$VELERO_PREFIX' NFS_S3_PREFIX='$NFS_S3_PREFIX' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' DR_PASSPHRASE='$pp' INVENTORY_FILE='/tmp/$(basename "$INV")' RUNBOOK_FILE='/tmp/DISASTER-RECOVERY.md' bash /tmp/15-dr-bundle.sh"
+  # clean the staged (plaintext) inventory/runbook off the master
+  rsh "$M0" "rm -f /tmp/$(basename "$INV") /tmp/DISASTER-RECOVERY.md /tmp/15-dr-bundle.sh" 2>/dev/null || true
+}
+
+# List Velero backups available for restore (from S3).
+cmd_backups(){ rsh "${M_IP[0]}" "sudo KUBECONFIG=/etc/kubernetes/admin.conf velero backup get"; }
+
+# Easy restore:  ./deploy.sh restore <backup-name> [namespace]
+cmd_restore(){
+  local b="${1:?usage: deploy.sh restore <backup-name> [namespace]}"; local ns="${2:-}"
+  local inc=""; [[ -n "$ns" ]] && inc="--include-namespaces $ns"
+  local rn="restore-${b}-$(date +%s)"
+  step "restoring from backup '$b'${ns:+ (namespace $ns)}"
+  rsh "${M_IP[0]}" "sudo KUBECONFIG=/etc/kubernetes/admin.conf velero restore create $rn --from-backup $b $inc --wait"
+  rsh "${M_IP[0]}" "sudo KUBECONFIG=/etc/kubernetes/admin.conf velero restore describe $rn" || true
+}
+
+# Install backup alerting (Prometheus rules + Velero ServiceMonitor).
+cmd_backup_alerts(){
+  [[ -f "$HERE/scripts/14-backup-alerts.sh" ]] || die "scripts/14-backup-alerts.sh not found"
+  local M0="${M_IP[0]}"; step "installing backup alerts (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/14-backup-alerts.sh"
+  rsh "$M0" "sudo bash /tmp/14-backup-alerts.sh"
+}
+
+# Install Knative (Serving + optional Eventing) on Istio, via the first master.
+cmd_knative(){
+  [[ -f "$HERE/scripts/06-knative-istio.sh" ]] || die "scripts/06-knative-istio.sh not found"
+  local M0="${M_IP[0]}"
+  step "installing Knative + Istio (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/06-knative-istio.sh"
+  rsh "$M0" "sudo $(knative_envstr) bash /tmp/06-knative-istio.sh"
+}
+
+# Install Argo CD (GitOps CD), via the first master.
+cmd_argocd(){
+  [[ -f "$HERE/scripts/07-argocd.sh" ]] || die "scripts/07-argocd.sh not found"
+  local M0="${M_IP[0]}"
+  step "installing Argo CD (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/07-argocd.sh"
+  rsh "$M0" "sudo ARGOCD_VERSION='$ARGOCD_VERSION' ARGOCD_INGRESS_TYPE='$ARGOCD_INGRESS_TYPE' bash /tmp/07-argocd.sh"
+}
+
+# Install OpenBao (HA Raft secret manager), via the first master.
+cmd_openbao(){
+  [[ -f "$HERE/scripts/08-openbao.sh" ]] || die "scripts/08-openbao.sh not found"
+  local M0="${M_IP[0]}"
+  step "installing OpenBao (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/08-openbao.sh"
+  rsh "$M0" "sudo OPENBAO_REPLICAS='$OPENBAO_REPLICAS' OPENBAO_INGRESS_TYPE='$OPENBAO_INGRESS_TYPE' OPENBAO_STORAGE_CLASS='$OPENBAO_STORAGE_CLASS' bash /tmp/08-openbao.sh"
+}
+
+# Add a single worker to an existing cluster (does NOT touch existing nodes).
+#   ./deploy.sh add-worker <name> <ip> [password]
+cmd_add_worker(){
+  local name="${1:?usage: deploy.sh add-worker <name> <ip> [password]}"
+  local ip="${2:?usage: deploy.sh add-worker <name> <ip> [password]}"
+  local pw="${3:-}"
+  local M0="${M_IP[0]}"
+  [[ -n "$pw" ]] && bootstrap_host "$SSH_USER" "$ip" "$pw"
+  step "adding worker $name ($ip)"
+  push "$M0"
+  local WJOIN; WJOIN="$(rsh "$M0" "sudo bash /tmp/k8s.sh token" | sed -n 's/^JOIN=//p' | tr -d '\"')"
+  [[ -n "$WJOIN" ]] || die "could not get a join token from $M0"
+  push "$ip"
+  rsh "$ip" "sudo $(envstr) JOIN='$WJOIN' bash /tmp/k8s.sh join"
+  log "worker $name joined. Verify from a master:  kubectl get nodes -o wide"
+}
+
+# Remove a worker from the cluster: drain -> delete -> (optional) reset the node.
+#   ./deploy.sh remove-worker <node-name> [ip]
+# <node-name> is the Kubernetes node name (from 'kubectl get nodes', i.e. the
+# host's hostname). Pass [ip] to also run 'kubeadm reset' on the node itself.
+cmd_remove_worker(){
+  local node="${1:?usage: deploy.sh remove-worker <node-name> [ip]}"
+  local ip="${2:-}"
+  local M0="${M_IP[0]}"
+  step "removing worker $node"
+  warn "This evicts all workloads from $node and removes it from the cluster."
+  read -rp "Type the node name '$node' to confirm: " a; [[ "$a" == "$node" ]] || die "aborted"
+  local K="sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl"
+  rsh "$M0" "$K cordon $node" || true
+  rsh "$M0" "$K drain $node --ignore-daemonsets --delete-emptydir-data --force --timeout=120s" || warn "drain reported issues (continuing)"
+  rsh "$M0" "$K delete node $node" || die "failed to delete node $node from the cluster"
+  if [[ -n "$ip" ]]; then
+    log "resetting kubeadm on $ip"
+    rsh "$ip" "sudo kubeadm reset -f; sudo rm -rf /etc/cni/net.d ~/.kube" || warn "reset on $ip reported issues"
+  else
+    warn "node deleted from cluster. To clean the machine itself: ssh to it and run 'sudo kubeadm reset -f'"
+  fi
+  log "worker $node removed. Verify:  kubectl get nodes"
+}
 
 cmd_upgrade(){
   local T="${1:?usage: deploy.sh upgrade <version e.g 1.37.0>}"
@@ -319,9 +597,25 @@ case "$ACTION" in
   install)    cmd_install ;;
   bootstrap)  print_plan; bootstrap_all ;;
   provision)  print_plan; provision_infra ;;
+  add-worker)    shift; cmd_add_worker "$@" ;;
+  remove-worker) shift; cmd_remove_worker "$@" ;;
   storage)    cmd_storage ;;
+  metrics)    cmd_metrics ;;
+  vpa)        cmd_vpa ;;
+  prometheus) cmd_prometheus ;;
+  knative)    cmd_knative ;;
+  argocd)     cmd_argocd ;;
+  openbao)    cmd_openbao ;;
+  velero)     cmd_velero ;;
+  nfs-s3-sync) cmd_nfs_s3 ;;
+  backup-alerts) cmd_backup_alerts ;;
+  dr-bundle)  cmd_dr_bundle ;;
+  openbao-snapshot) cmd_openbao_snapshot ;;
+  dr-protect) cmd_dr_protect ;;
+  backups)    cmd_backups ;;
+  restore)    shift; cmd_restore "$@" ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | storage | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | dr-bundle | openbao-snapshot | dr-protect | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
 esac

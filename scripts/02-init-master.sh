@@ -28,6 +28,7 @@ else
 fi
 
 kubeadm init "${ARGS[@]}" | tee /var/log/kubeadm-init.log
+apply_max_pods
 
 # --- kubeconfig for root + the invoking sudo user ---------------------------
 export KUBECONFIG=/etc/kubernetes/admin.conf

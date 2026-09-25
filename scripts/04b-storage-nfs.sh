@@ -19,6 +19,9 @@ NFS_SERVER="${NFS_SERVER:-}"
 NFS_PATH="${NFS_PATH:-/srv/nfs/k8s}"
 NFS_SC_NAME="${NFS_SC_NAME:-nfs-client}"
 NFS_SET_DEFAULT_SC="${NFS_SET_DEFAULT_SC:-true}"
+NFS_ARCHIVE_ON_DELETE="${NFS_ARCHIVE_ON_DELETE:-true}"   # true = keep (rename) data on PVC delete
+NFS_ARCHIVE_RETENTION="${NFS_ARCHIVE_RETENTION:-3}"      # keep last N archived copies per PVC (0 = all)
+NFS_ARCHIVE_PRUNE_SCHEDULE="${NFS_ARCHIVE_PRUNE_SCHEDULE:-0 2 * * *}"
 NFS_NAMESPACE="${NFS_NAMESPACE:-nfs-provisioner}"
 NFS_PROVISIONER_IMAGE="${NFS_PROVISIONER_IMAGE:-registry.k8s.io/sig-storage/nfs-subdir-external-provisioner:v4.0.2}"
 
@@ -116,7 +119,7 @@ metadata:
     ${DEFAULT_ANN}
 provisioner: k8s-sigs.io/nfs-subdir-external-provisioner
 parameters:
-  archiveOnDelete: "false"
+  archiveOnDelete: "${NFS_ARCHIVE_ON_DELETE}"
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
 allowVolumeExpansion: true
@@ -125,6 +128,48 @@ EOF
 log "waiting for provisioner to roll out"
 kubectl -n "$NFS_NAMESPACE" rollout status deploy/nfs-client-provisioner --timeout=300s || \
   warn "provisioner not ready yet — check: kubectl -n ${NFS_NAMESPACE} get pods"
+
+# Retention pruner: keep only the last N archived-* copies per PVC group.
+if [[ "$NFS_ARCHIVE_ON_DELETE" == true && "${NFS_ARCHIVE_RETENTION}" =~ ^[0-9]+$ && "$NFS_ARCHIVE_RETENTION" -gt 0 ]]; then
+  log "installing archive-retention CronJob (keep last ${NFS_ARCHIVE_RETENTION} per PVC)"
+  kubectl apply -f - <<EOF
+apiVersion: batch/v1
+kind: CronJob
+metadata: { name: nfs-archive-pruner, namespace: ${NFS_NAMESPACE} }
+spec:
+  schedule: "${NFS_ARCHIVE_PRUNE_SCHEDULE}"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: pruner
+              image: alpine:3.20
+              env: [{ name: KEEP, value: "${NFS_ARCHIVE_RETENTION}" }]
+              command: ["/bin/sh","-c"]
+              args:
+                - |
+                  set -e
+                  cd /export || exit 0
+                  for d in archived-*; do
+                    [ -d "\$d" ] || continue
+                    grp=\$(printf '%s' "\$d" | sed -E 's/-pvc-[0-9a-f-]+\$//')
+                    printf '%s|%s|%s\n' "\$grp" "\$(stat -c %Y "\$d")" "\$d"
+                  done | sort -t'|' -k1,1 -k2,2nr \
+                  | awk -F'|' -v keep="\$KEEP" '{c[\$1]++; if (c[\$1]>keep) print \$3}' \
+                  | while read -r old; do echo "pruning \$old"; rm -rf "/export/\$old"; done
+                  echo "retention pass done (keep=\$KEEP per PVC)"
+              volumeMounts: [{ name: export, mountPath: /export }]
+          volumes:
+            - name: export
+              nfs: { server: "${NFS_SERVER}", path: "${NFS_PATH}" }
+EOF
+fi
 
 log "done. StorageClasses:"; kubectl get sc
 echo
