@@ -141,6 +141,12 @@ NFS_S3_STORAGE_CLASS="${SET[NFS_S3_STORAGE_CLASS]:-STANDARD}"
 NFS_S3_KEEP="${SET[NFS_S3_KEEP]:-4}"                            # always keep newest 4 daily snapshots
 AWS_REGION="${SET[AWS_REGION]:-}"
 AWS_ACCESS_KEY_ID="${SET[AWS_ACCESS_KEY_ID]:-}"; AWS_SECRET_ACCESS_KEY="${SET[AWS_SECRET_ACCESS_KEY]:-}"
+# Automated OpenBao raft snapshot -> S3 (no passphrase needed; on by default when
+# OpenBao + S3 are configured). And the encrypted DR key-bundle (needs a passphrase).
+OPENBAO_SNAPSHOT="${SET[OPENBAO_SNAPSHOT]:-true}"
+BAO_SNAP_SCHEDULE="${SET[BAO_SNAP_SCHEDULE]:-0 2 * * *}"; BAO_SNAP_KEEP="${SET[BAO_SNAP_KEEP]:-4}"
+DR_BUNDLE="${SET[DR_BUNDLE]:-true}"            # offer to store the encrypted DR bundle during install
+DR_PASSPHRASE="${DR_PASSPHRASE:-}"             # env only (never inventory); prompted if empty
 
 # ---- Knative + Istio (optional) --------------------------------------------
 KNATIVE="${SET[KNATIVE]:-true}"                  # installed by default; set false to skip
@@ -326,6 +332,8 @@ cmd_install(){
   [[ "$VELERO" == true ]] && cmd_velero
   [[ "$NFS_S3_SYNC" == true ]] && cmd_nfs_s3
   [[ "$BACKUP_ALERTS" == true && "$PROMETHEUS" == true ]] && cmd_backup_alerts
+  # DR protection: auto OpenBao snapshot + accept-to-store encrypted key bundle.
+  cmd_dr_protect
 
   if [[ "$FETCH_KUBECONFIG" == true ]]; then
     fetch_kubeconfig
@@ -398,6 +406,51 @@ cmd_nfs_s3(){
   local M0="${M_IP[0]}"; step "installing NFS->S3 sync (via $M0)"
   push_as "$SSH_USER" "$M0" "$HERE/scripts/13-nfs-s3-sync.sh"
   rsh "$M0" "sudo NFS_S3_BUCKET='$NFS_S3_BUCKET' NFS_S3_PREFIX='$NFS_S3_PREFIX' NFS_S3_STORAGE_CLASS='$NFS_S3_STORAGE_CLASS' NFS_S3_KEEP='$NFS_S3_KEEP' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' bash /tmp/13-nfs-s3-sync.sh"
+}
+
+# Install the automated OpenBao raft-snapshot -> S3 CronJob (no passphrase needed).
+cmd_openbao_snapshot(){
+  [[ -f "$HERE/scripts/16-openbao-snapshot.sh" ]] || die "scripts/16-openbao-snapshot.sh not found"
+  local bucket="${VELERO_BUCKET:-$NFS_S3_BUCKET}"
+  [[ -n "$bucket" && -n "$AWS_REGION" && -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] \
+    || die "OpenBao snapshot needs a bucket (VELERO_BUCKET/NFS_S3_BUCKET), AWS_REGION and AWS creds"
+  local M0="${M_IP[0]}"; step "installing automated OpenBao snapshot -> s3://$bucket/openbao (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/16-openbao-snapshot.sh"
+  rsh "$M0" "sudo BAO_SNAP_BUCKET='$bucket' BAO_SNAP_PREFIX='openbao' BAO_SNAP_SCHEDULE='$BAO_SNAP_SCHEDULE' BAO_SNAP_KEEP='$BAO_SNAP_KEEP' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' bash /tmp/16-openbao-snapshot.sh"
+}
+
+# Interactive DR-protection setup run at the end of install: by default it sets up
+# the automated OpenBao snapshot and offers to store the encrypted DR key-bundle.
+# The user must ACCEPT the bundle (and remember the passphrase) or opt out to do it
+# manually later. Skipped automatically if S3 isn't configured.
+cmd_dr_protect(){
+  local bucket="${VELERO_BUCKET:-$NFS_S3_BUCKET}"
+  [[ -n "$bucket" && -n "$AWS_REGION" && -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] || {
+    warn "S3 not configured — skipping DR protection (run './deploy.sh openbao-snapshot' and './deploy.sh dr-bundle' later)"; return 0; }
+  # 1. OpenBao snapshot: automatic, no passphrase.
+  if [[ "$OPENBAO" == true && "$OPENBAO_SNAPSHOT" == true ]]; then cmd_openbao_snapshot || warn "openbao snapshot setup had issues"; fi
+  # 2. Encrypted DR bundle: requires the operator to accept + own a passphrase.
+  [[ "$DR_BUNDLE" == true ]] || { warn "DR_BUNDLE=false — skipping the encrypted key bundle"; return 0; }
+  echo
+  step "DR key bundle"
+  cat <<EOF
+This stores your recovery KEYS in S3, encrypted with a passphrase you choose:
+  - OpenBao unseal keys + root token, restic repo password, inventory, runbook
+  - uploaded to s3://${bucket}/dr-bundle/ (AES-256; useless without the passphrase)
+
+IMPORTANT: at recovery time you will need TWO things, kept OFF the cluster:
+  1) your AWS login      2) THIS passphrase  (store it in a password manager)
+If you lose the passphrase, this bundle cannot be recovered.
+EOF
+  local ans=""
+  if [[ -n "$DR_PASSPHRASE" ]]; then ans=y; else
+    read -rp "Create and store the encrypted DR bundle now? [Y/n] " ans; ans="${ans:-y}"
+  fi
+  if [[ "$ans" =~ ^[Yy]$ ]]; then
+    cmd_dr_bundle
+  else
+    warn "skipped. Store it yourself later with:  ./deploy.sh -i <inventory> dr-bundle"
+  fi
 }
 
 # Build + upload the encrypted DR "break-glass" bundle (keys + inventory + runbook)
@@ -559,10 +612,12 @@ case "$ACTION" in
   nfs-s3-sync) cmd_nfs_s3 ;;
   backup-alerts) cmd_backup_alerts ;;
   dr-bundle)  cmd_dr_bundle ;;
+  openbao-snapshot) cmd_openbao_snapshot ;;
+  dr-protect) cmd_dr_protect ;;
   backups)    cmd_backups ;;
   restore)    shift; cmd_restore "$@" ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | dr-bundle | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | dr-bundle | openbao-snapshot | dr-protect | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
 esac
