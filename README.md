@@ -708,6 +708,24 @@ kubectl get vulnerabilitymanifestsummaries -A        # image vulnerabilities
 kubectl -n kubescape create job scan-now --from=cronjob/kubescape-scheduler  # on-demand
 ```
 
+### Headlamp (open-source web dashboard)
+An in-cluster, open-source web UI for the cluster, with the **Kubescape plugin** so
+the security/compliance results show in a browser (no external SaaS):
+```bash
+./deploy.sh headlamp             # on by default (HEADLAMP=true)
+```
+It installs [Headlamp](https://headlamp.dev) with the Kubescape Headlamp plugin and
+exposes it via the nginx Ingress at `http://headlamp.<LB_HOST>.sslip.io/` (reachable
+through HAProxy, no DNS needed). Log in with a token:
+```bash
+kubectl create token headlamp -n headlamp --duration=24h
+```
+The login ServiceAccount is read-only (`view` + read on Kubescape CRDs); set
+`HEADLAMP_ADMIN=true` for a cluster-admin login instead. The **Kubescape** section in
+the UI shows compliance scores and image vulnerabilities; the rest is a general
+Kubernetes dashboard. (Note: the open-source Kubescape operator has no built-in web
+UI — Headlamp is the self-hosted way to view its data.)
+
 > **Security:** move `openbao-init.json` out of the node into real secret storage
 > and delete it; losing the keys loses access, leaking them is full compromise.
 > There is **no auto-unseal** on bare metal (no cloud KMS), so after a pod/node

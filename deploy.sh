@@ -179,6 +179,9 @@ CERT_MANAGER="${SET[CERT_MANAGER]:-true}"               # cert-manager; issuers 
 ACME_EMAIL="${SET[ACME_EMAIL]:-}"                        # Let's Encrypt contact (needed for ClusterIssuers)
 KUBESCAPE="${SET[KUBESCAPE]:-true}"                      # Kubescape security/compliance operator
 KUBESCAPE_CLUSTER_NAME="${SET[KUBESCAPE_CLUSTER_NAME]:-${CLUSTER_NAME:-kubernetes}}"
+HEADLAMP="${SET[HEADLAMP]:-true}"                        # Headlamp web dashboard + Kubescape plugin
+HEADLAMP_HOST="${SET[HEADLAMP_HOST]:-}"                  # Ingress host; default headlamp.<LB_HOST>.sslip.io
+HEADLAMP_ADMIN="${SET[HEADLAMP_ADMIN]:-false}"           # true = cluster-admin login SA (default read-only)
 
 # HA auto-detect
 if [[ ${#MASTERS[@]} -gt 1 ]]; then
@@ -346,6 +349,7 @@ cmd_install(){
   [[ "$INGRESS_NGINX" == true ]] && cmd_ingress_nginx
   [[ "$CERT_MANAGER" == true ]] && cmd_cert_manager
   [[ "$KUBESCAPE" == true ]] && cmd_kubescape
+  [[ "$HEADLAMP" == true ]] && cmd_headlamp
   [[ "$PROMETHEUS" == true ]] && cmd_prometheus
   [[ "$KNATIVE" == true ]] && cmd_knative
   [[ "$ARGOCD" == true ]] && cmd_argocd
@@ -452,6 +456,16 @@ cmd_kubescape(){
   local M0="${M_IP[0]}"; step "installing Kubescape operator (via $M0)"
   push_as "$SSH_USER" "$M0" "$HERE/scripts/20-kubescape.sh"
   rsh "$M0" "sudo KUBESCAPE_CLUSTER_NAME='$KUBESCAPE_CLUSTER_NAME' bash /tmp/20-kubescape.sh"
+}
+
+# Install Headlamp (open-source web dashboard) with the Kubescape plugin.
+cmd_headlamp(){
+  [[ -f "$HERE/scripts/21-headlamp.sh" ]] || die "scripts/21-headlamp.sh not found"
+  local host="$HEADLAMP_HOST"
+  [[ -z "$host" && -n "$LB_HOST" ]] && host="headlamp.${LB_HOST}.sslip.io"   # reachable via HAProxy, no DNS needed
+  local M0="${M_IP[0]}"; step "installing Headlamp dashboard${host:+ (http://$host/)} (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/21-headlamp.sh"
+  rsh "$M0" "sudo HEADLAMP_HOST='$host' INGRESS_CLASS=nginx HEADLAMP_ADMIN='$HEADLAMP_ADMIN' bash /tmp/21-headlamp.sh"
 }
 
 # Install External Secrets Operator and wire it to OpenBao (define secrets in
@@ -669,11 +683,12 @@ case "$ACTION" in
   ingress-nginx) cmd_ingress_nginx ;;
   cert-manager) cmd_cert_manager ;;
   kubescape)  cmd_kubescape ;;
+  headlamp)   cmd_headlamp ;;
   dr-protect) cmd_dr_protect ;;
   backups)    cmd_backups ;;
   restore)    shift; cmd_restore "$@" ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | dr-bundle | openbao-snapshot | external-secrets | ingress-nginx | cert-manager | kubescape | dr-protect | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | dr-bundle | openbao-snapshot | external-secrets | ingress-nginx | cert-manager | kubescape | headlamp | dr-protect | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
 esac
