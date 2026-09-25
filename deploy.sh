@@ -400,6 +400,30 @@ cmd_nfs_s3(){
   rsh "$M0" "sudo NFS_S3_BUCKET='$NFS_S3_BUCKET' NFS_S3_PREFIX='$NFS_S3_PREFIX' NFS_S3_STORAGE_CLASS='$NFS_S3_STORAGE_CLASS' NFS_S3_KEEP='$NFS_S3_KEEP' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' bash /tmp/13-nfs-s3-sync.sh"
 }
 
+# Build + upload the encrypted DR "break-glass" bundle (keys + inventory + runbook)
+# to S3. After a disaster you only need your AWS login + the passphrase.
+cmd_dr_bundle(){
+  [[ -f "$HERE/scripts/15-dr-bundle.sh" ]] || die "scripts/15-dr-bundle.sh not found"
+  local bucket="${VELERO_BUCKET:-$NFS_S3_BUCKET}"
+  [[ -n "$bucket" && -n "$AWS_REGION" && -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] \
+    || die "DR bundle needs a bucket (VELERO_BUCKET/NFS_S3_BUCKET), AWS_REGION and AWS creds (put them in a private *.local.conf)"
+  # Passphrase: never stored. Take DR_PASSPHRASE from env, else prompt (hidden).
+  local pp="${DR_PASSPHRASE:-}"
+  if [[ -z "$pp" ]]; then
+    read -rsp "DR bundle passphrase (keep this OFF-cluster; you need it to recover): " pp; echo
+    local pp2; read -rsp "Confirm passphrase: " pp2; echo
+    [[ "$pp" == "$pp2" ]] || die "passphrases did not match"
+  fi
+  [[ -n "$pp" ]] || die "empty passphrase"
+  local M0="${M_IP[0]}"; step "building encrypted DR bundle -> s3://$bucket/dr-bundle (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/15-dr-bundle.sh"
+  push_as "$SSH_USER" "$M0" "$INV"
+  [[ -f "$HERE/docs/DISASTER-RECOVERY.md" ]] && push_as "$SSH_USER" "$M0" "$HERE/docs/DISASTER-RECOVERY.md"
+  rsh "$M0" "sudo DR_BUCKET='$bucket' DR_PREFIX='dr-bundle' VELERO_PREFIX='$VELERO_PREFIX' NFS_S3_PREFIX='$NFS_S3_PREFIX' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' DR_PASSPHRASE='$pp' INVENTORY_FILE='/tmp/$(basename "$INV")' RUNBOOK_FILE='/tmp/DISASTER-RECOVERY.md' bash /tmp/15-dr-bundle.sh"
+  # clean the staged (plaintext) inventory/runbook off the master
+  rsh "$M0" "rm -f /tmp/$(basename "$INV") /tmp/DISASTER-RECOVERY.md /tmp/15-dr-bundle.sh" 2>/dev/null || true
+}
+
 # List Velero backups available for restore (from S3).
 cmd_backups(){ rsh "${M_IP[0]}" "sudo KUBECONFIG=/etc/kubernetes/admin.conf velero backup get"; }
 
@@ -534,10 +558,11 @@ case "$ACTION" in
   velero)     cmd_velero ;;
   nfs-s3-sync) cmd_nfs_s3 ;;
   backup-alerts) cmd_backup_alerts ;;
+  dr-bundle)  cmd_dr_bundle ;;
   backups)    cmd_backups ;;
   restore)    shift; cmd_restore "$@" ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | dr-bundle | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
 esac

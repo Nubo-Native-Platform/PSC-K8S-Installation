@@ -31,6 +31,32 @@ your only keys to the S3 data:
 4. The **inventory** (`prod1-cluster.local.conf`) so you can rebuild the same
    topology.
 
+### Easy option: the encrypted "break-glass" bundle
+
+Instead of tracking those files by hand, `deploy.sh dr-bundle` packages **all of
+them** (OpenBao keys, restic password, inventory, and this runbook) into one file,
+encrypts it with AES-256 using a passphrase **you choose**, and uploads it to
+`s3://<bucket>/dr-bundle/`. Because it is encrypted, it is safe to keep in the same
+bucket as the backups — without the passphrase it is useless.
+
+```bash
+# needs a bucket + AWS creds in your *.local.conf (same ones Velero uses)
+./deploy.sh -i prod1-cluster.local.conf dr-bundle      # prompts for a passphrase
+```
+
+After that, the **only two things you keep off-cluster** are your **AWS login** and
+that **passphrase** (memorize it / store it in a password manager). Recover the
+bundle any time with:
+```bash
+aws s3 cp s3://<bucket>/dr-bundle/dr-bundle-latest.enc - \
+  | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass pass:'<PASSPHRASE>' \
+  | tar -xzf -
+cat dr-bundle/MANIFEST.txt      # keys + step-by-step recovery
+```
+Re-run `dr-bundle` whenever the keys or inventory change (it keeps the newest 4).
+**Do NOT** store these secrets in S3 unencrypted, and never put the AWS credentials
+themselves inside the bundle — they're what you use to reach the bucket.
+
 ---
 
 ## The recovery model: rebuild the platform from code, restore your data from S3
