@@ -20,6 +20,14 @@ set -euo pipefail
 KUBESCAPE_NS="${KUBESCAPE_NS:-kubescape}"
 KUBESCAPE_CLUSTER_NAME="${KUBESCAPE_CLUSTER_NAME:-kubernetes}"
 KUBESCAPE_VERSION="${KUBESCAPE_VERSION:-}"
+# Posture frameworks to scan. Default to the well-established nsa+mitre, which are
+# in the scanner's bundled control library. The newer "security" framework
+# references controls (e.g. C-0214) that only load if the full library can be
+# downloaded (download.armosec.io); when it can't, the scan aborts with
+# "framework 'C-0214' not found" and NO summaries are produced. So we pin known
+# frameworks and disable the security framework by default.
+KUBESCAPE_FRAMEWORKS="${KUBESCAPE_FRAMEWORKS:-nsa,mitre}"
+KUBESCAPE_SECURITY_FRAMEWORK="${KUBESCAPE_SECURITY_FRAMEWORK:-false}"
 export KUBECONFIG="${KUBECONFIG:-/etc/kubernetes/admin.conf}"
 g='\033[0;32m'; y='\033[0;33m'; r='\033[0;31m'; n='\033[0m'
 log(){ echo -e "${g}[+]${n} $*"; }; warn(){ echo -e "${y}[!]${n} $*"; }; die(){ echo -e "${r}[x]${n} $*" >&2; exit 1; }
@@ -36,6 +44,8 @@ for i in 1 2 3; do
       -n "$KUBESCAPE_NS" --create-namespace \
       --set clusterName="$KUBESCAPE_CLUSTER_NAME" \
       --set capabilities.continuousScan=enable \
+      --set operator.triggerSecurityFramework="$KUBESCAPE_SECURITY_FRAMEWORK" \
+      --set "defaultFrameworks={${KUBESCAPE_FRAMEWORKS}}" \
       "${VER[@]}" --wait --timeout 6m; then ok=true; break; fi
   warn "helm attempt $i failed — retrying"; sleep 5
 done
