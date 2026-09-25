@@ -73,7 +73,10 @@ need_root(){ [[ $EUID -eq 0 ]] || die "run as root (use sudo)"; }
 pm(){ command -v apt-get >/dev/null && echo apt || { command -v dnf >/dev/null && echo dnf || die "need apt or dnf"; }; }
 # apt-get update can hit transient mirror-sync errors ("File has unexpected
 # size"); retry a few times before giving up.
-apt_update(){ local i; for i in 1 2 3 4 5; do apt-get update -qq && return 0; warn "apt-get update failed (attempt $i/5) — retrying in 5s"; sleep 5; done; die "apt-get update failed after 5 attempts"; }
+apt_update(){ local i; for i in 1 2 3 4 5; do apt-get update -qq -o DPkg::Lock::Timeout=600 && return 0; warn "apt-get update failed (attempt $i/5) — retrying in 5s"; sleep 5; done; die "apt-get update failed after 5 attempts"; }
+# apt-get install can also fail transiently, and the dpkg lock is often held by
+# unattended-upgrades on a fresh VM. Wait up to 10min for the lock, and retry.
+apt_install(){ local i; for i in 1 2 3; do DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o DPkg::Lock::Timeout=600 "$@" && return 0; warn "apt-get install failed (attempt $i/3) — retrying in 10s"; sleep 10; done; die "apt-get install failed: $*"; }
 ver(){ [[ -n "$K8S_PATCH" ]] && echo "${K8S_PATCH}-1.1" || echo ""; }
 myip(){ [[ -n "$APISERVER_ADVERTISE_ADDRESS" ]] && echo "$APISERVER_ADVERTISE_ADDRESS" || ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}'; }
 
@@ -115,12 +118,12 @@ EOF
   if [[ "$P" == apt ]]; then
     export DEBIAN_FRONTEND=noninteractive
     apt_update
-    apt-get install -y -qq ca-certificates curl gnupg apt-transport-https
+    apt_install ca-certificates curl gnupg apt-transport-https
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
     chmod a+r /etc/apt/keyrings/docker.gpg
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release; echo "$VERSION_CODENAME") stable" >/etc/apt/sources.list.d/docker.list
-    apt_update; apt-get install -y -qq containerd.io
+    apt_update; apt_install containerd.io
   else
     dnf install -y -q dnf-plugins-core curl
     dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
@@ -138,9 +141,9 @@ EOF
     curl -fsSL "https://pkgs.k8s.io/core:/stable:/v${K8S_MINOR}/deb/Release.key" | gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
     echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${K8S_MINOR}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
     apt_update
-    if [[ -n "$V" ]]; then apt-get install -y -qq kubelet="$V" kubeadm="$V" kubectl="$V"; else apt-get install -y -qq kubelet kubeadm kubectl; fi
+    if [[ -n "$V" ]]; then apt_install kubelet="$V" kubeadm="$V" kubectl="$V"; else apt_install kubelet kubeadm kubectl; fi
     apt-mark hold kubelet kubeadm kubectl >/dev/null
-    apt-get install -y -qq open-iscsi nfs-common
+    apt_install open-iscsi nfs-common
   else
     cat >/etc/yum.repos.d/kubernetes.repo <<EOF
 [kubernetes]
@@ -404,7 +407,7 @@ cmd_upgrade(){
     curl -fsSL "https://pkgs.k8s.io/core:/stable:/v${M}/deb/Release.key" | gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
     echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v${M}/deb/ /" >/etc/apt/sources.list.d/kubernetes.list
     apt_update; apt-mark unhold kubeadm >/dev/null
-    apt-get install -y -qq --allow-change-held-packages kubeadm="$V"; apt-mark hold kubeadm >/dev/null
+    apt_install --allow-change-held-packages kubeadm="$V"; apt-mark hold kubeadm >/dev/null
   else
     sed -i "s#v[0-9]*\.[0-9]*/rpm#v${M}/rpm#g" /etc/yum.repos.d/kubernetes.repo
     dnf install -y -q --disableexcludes=kubernetes kubeadm-"$V"
@@ -417,7 +420,7 @@ cmd_upgrade(){
   log "upgrading kubelet+kubectl to ${T}"
   if [[ "$P" == apt ]]; then
     apt-mark unhold kubelet kubectl >/dev/null
-    apt-get install -y -qq --allow-change-held-packages kubelet="$V" kubectl="$V"; apt-mark hold kubelet kubectl >/dev/null
+    apt_install --allow-change-held-packages kubelet="$V" kubectl="$V"; apt-mark hold kubelet kubectl >/dev/null
   else
     dnf install -y -q --disableexcludes=kubernetes kubelet-"$V" kubectl-"$V"
   fi

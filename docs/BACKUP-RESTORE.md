@@ -15,6 +15,29 @@ importantly — **how to restore**.
 > Velero is the primary DR tool. The NFS→S3 sync is a file-level safety copy.
 > OpenBao must be snapshotted with its own tooling.
 
+### Why keep BOTH Velero and restic (they overlap — on purpose)
+
+Velero File System Backup and the restic NFS sync both capture PVC data (all PVCs
+live on the NFS export), so they overlap. We keep both deliberately, because each
+covers a gap the other has:
+
+- **Velero FSB only backs up volumes that a *running pod has mounted.*** A
+  bound-but-unmounted PVC — a scaled-to-zero app, a down StatefulSet replica, a
+  Retained/released PV — is **silently skipped by Velero**. restic backs up the
+  whole `/srv/nfs/k8s` export, so those are still captured. This is a correctness
+  gap, not just redundancy: with Velero-only you'd discover the missing volume
+  during a restore, the worst possible time.
+- **restic** also gives file-level restore and an independent copy if Velero's
+  metadata/repo is ever corrupt.
+
+**Cost is negligible:** restic dedups + keeps only the last 4 snapshots (a copy
+plus deltas, not 4× full copies). **For restore you use Velero alone** — it brings
+the PVC object + data + wiring back in one command; restic is the fallback for the
+gap cases above, not a second mandatory restore step. Velero-only is acceptable
+*only* if you can guarantee every important PVC is always mounted and you never
+need single-file restore — a fragile promise for a general-purpose platform, so
+the default keeps both.
+
 ## Retention & cost
 
 Retention is **count-based** ("always keep the newest N"), with a **30-day

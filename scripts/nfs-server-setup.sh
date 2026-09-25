@@ -56,6 +56,19 @@ mkdir -p "$NFS_PATH"
 chown nobody:nogroup "$NFS_PATH" 2>/dev/null || chown 65534:65534 "$NFS_PATH"
 chmod 0755 "$NFS_PATH"
 
+# Defensive: if this export ALREADY holds data created before all_squash was
+# applied (files owned by real UIDs like 100), those files become unreadable once
+# all_squash maps every client to the anon UID (65534) — e.g. OpenBao's raft
+# node-id, which then fails to open on the next pod restart ("permission denied").
+# Re-home any such pre-existing data to the anon UID so a mid-life hardening of
+# the export never strands running workloads. (Fresh subdirs are already 65534.)
+if [[ "${NFS_OPTS}" == *all_squash* ]] && [[ -n "$(ls -A "$NFS_PATH" 2>/dev/null)" ]]; then
+  if find "$NFS_PATH" -maxdepth 3 ! -uid 65534 -print -quit 2>/dev/null | grep -q .; then
+    log "re-homing pre-existing export data to anon uid 65534 (all_squash consistency)"
+    chown -R 65534:65534 "$NFS_PATH"/* 2>/dev/null || true
+  fi
+fi
+
 log "configuring /etc/exports  (${NFS_PATH}  ${NFS_CIDR}(${NFS_OPTS}))"
 LINE="${NFS_PATH} ${NFS_CIDR}(${NFS_OPTS})"
 touch /etc/exports

@@ -34,14 +34,14 @@ log "installing containerd"
 if [[ "$PM" == apt ]]; then
   export DEBIAN_FRONTEND=noninteractive
   apt_update
-  apt-get install -y -qq ca-certificates curl gnupg apt-transport-https
+  apt_install ca-certificates curl gnupg apt-transport-https
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
   chmod a+r /etc/apt/keyrings/docker.gpg
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release; echo $VERSION_CODENAME) stable" \
     >/etc/apt/sources.list.d/docker.list
   apt_update
-  apt-get install -y -qq containerd.io
+  apt_install containerd.io
 else
   dnf install -y -q dnf-plugins-core curl
   dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
@@ -66,9 +66,9 @@ if [[ "$PM" == apt ]]; then
     >/etc/apt/sources.list.d/kubernetes.list
   apt_update
   if [[ -n "$VER" ]]; then
-    apt-get install -y -qq --allow-change-held-packages kubelet="$VER" kubeadm="$VER" kubectl="$VER"
+    apt_install --allow-change-held-packages kubelet="$VER" kubeadm="$VER" kubectl="$VER"
   else
-    apt-get install -y -qq kubelet kubeadm kubectl
+    apt_install kubelet kubeadm kubectl
   fi
   apt-mark hold kubelet kubeadm kubectl >/dev/null
 else
@@ -92,7 +92,7 @@ systemctl enable kubelet >/dev/null
 # open-iscsi is required by Longhorn — install now so workers are ready.
 log "installing open-iscsi + nfs client (needed by Longhorn)"
 if [[ "$PM" == apt ]]; then
-  apt-get install -y -qq open-iscsi nfs-common
+  apt_install open-iscsi nfs-common
 else
   dnf install -y -q iscsi-initiator-utils nfs-utils
 fi

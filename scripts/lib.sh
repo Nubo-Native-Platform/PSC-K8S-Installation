@@ -50,7 +50,10 @@ apply_max_pods() {
 
 # apt-get update can hit transient mirror-sync errors ("File has unexpected
 # size"); retry a few times before giving up.
-apt_update() { local i; for i in 1 2 3 4 5; do apt-get update -qq && return 0; warn "apt-get update failed (attempt $i/5) — retrying in 5s"; sleep 5; done; die "apt-get update failed after 5 attempts"; }
+apt_update() { local i; for i in 1 2 3 4 5; do apt-get update -qq -o DPkg::Lock::Timeout=600 && return 0; warn "apt-get update failed (attempt $i/5) — retrying in 5s"; sleep 5; done; die "apt-get update failed after 5 attempts"; }
+# apt-get install can also fail transiently, and the dpkg lock is often held by
+# unattended-upgrades on a fresh VM. Wait up to 10min for the lock, and retry.
+apt_install() { local i; for i in 1 2 3; do DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o DPkg::Lock::Timeout=600 "$@" && return 0; warn "apt-get install failed (attempt $i/3) — retrying in 10s"; sleep 10; done; die "apt-get install failed: $*"; }
 
 # Resolve K8S_MINOR=latest|auto|empty -> newest stable minor from upstream.
 # e.g. stable.txt = v1.37.0  ->  K8S_MINOR=1.37.  Pin K8S_MINOR (e.g. 1.36) to override.

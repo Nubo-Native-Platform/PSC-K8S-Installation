@@ -33,58 +33,92 @@ your only keys to the S3 data:
 
 ---
 
+## The recovery model: rebuild the platform from code, restore your data from S3
+
+This is the single most important idea, and it was **proven in a full total-loss
+drill** (see [Tested](#tested)):
+
+- **Platform / infrastructure = rebuilt from code** (this repo): Kubernetes itself,
+  the CNI, storage class, and the *operators* — Istio, Knative, Prometheus,
+  metrics-server, VPA, and the Argo CD / OpenBao **installs**. These are stateless
+  and reproducible; `deploy.sh` recreates them identically from pinned versions.
+- **Your data = restored from S3**: every **application namespace** (Deployments,
+  StatefulSets, ConfigMaps, Secrets, and **PVC data**), plus Argo CD's config and
+  OpenBao's secrets.
+
+**Why not restore the platform operators from Velero too?** Because it's fragile:
+operators carry cluster-scoped CRDs, webhooks and admission configs that conflict
+on restore. Worse, **Velero only auto-includes a CRD in a backup if a live custom
+resource of that type exists** — e.g. if you had no `Application` objects, the
+`applications.argoproj.io` CRD is *not in the backup*, and restoring Argo CD from
+S3 leaves its server crash-looping. Reinstalling the operator from code brings the
+correct CRDs; then you restore your CRs/data on top. (Verified: this is exactly
+what failed and how it was fixed in the drill.)
+
+---
+
 ## Full recovery procedure
 
-### 1. Build a fresh, MINIMAL cluster
-Rebuild base Kubernetes + storage + Velero only — do **not** reinstall the
-platform add-ons (they'll come back from the restore). In your recovery
-inventory set the add-ons off, keep storage + velero on:
+### 1. Rebuild the full cluster from code
+Run the normal one-shot build against your recovery inventory. This recreates the
+base cluster + storage + Velero **and** the platform operators (Istio, Knative,
+Prometheus, Argo CD, OpenBao) fresh:
 ```ini
-KNATIVE=false
-KNATIVE_EVENTING=false
-ARGOCD=false
-OPENBAO=false
-PROMETHEUS=false        # optional; it's excluded from backups anyway
 STORAGE=nfs             # the default StorageClass MUST exist before restore
 NFS_SETUP=true
 VELERO=true
-VELERO_BUCKET=<same-bucket>
+VELERO_BUCKET=<same-bucket>   # SAME bucket as before — Velero then sees old backups
+VELERO_PREFIX=velero
 AWS_REGION=<region>
 AWS_ACCESS_KEY_ID=<...>
 AWS_SECRET_ACCESS_KEY=<...>
 ```
 ```bash
-./deploy.sh -i prod1-cluster.local.conf
+./deploy.sh -i prod1-cluster.local.conf check     # verify SSH+sudo on fresh VMs
+./deploy.sh -i prod1-cluster.local.conf           # build everything
 ```
-Velero installs pointing at the **same bucket**, so it immediately sees the
-existing backups. (The default `nfs-client` StorageClass must exist before you
-restore PVCs — the storage step provides it.)
+If a node aborts on a dpkg lock (`unattended-upgrades` on a fresh VM), it now
+waits for the lock automatically; just re-run. Velero comes up pointing at the
+**same bucket + `velero/` prefix**, so it immediately lists the existing backups.
 
 ### 2. Confirm the backups are visible from S3
 ```bash
 ./deploy.sh -i prod1-cluster.local.conf backups
 # or on a master:  velero backup get
 ```
-You should see your daily backups (e.g. `daily-all-YYYYMMDD...`).
+You should see your daily backups (e.g. `daily-all-YYYYMMDD...`) — proof the fresh
+cluster can read the old S3 data.
 
-### 3. Restore
-Restore the whole cluster's workloads from the newest backup:
+### 3. Restore your application namespaces from S3
+One command brings back **all** your app namespaces + PVC data, skipping the
+platform/system namespaces you just rebuilt from code (avoids operator/CRD
+conflicts):
 ```bash
-./deploy.sh -i prod1-cluster.local.conf restore <backup-name>
+velero restore create full-dr --from-backup <backup-name> \
+  --exclude-namespaces kube-system,kube-public,kube-node-lease,kube-flannel,velero,nfs-provisioner,istio-system,knative-serving,knative-eventing,monitoring \
+  --wait
 ```
-or a single namespace:
+or restore one namespace (helper wrapper):
 ```bash
 ./deploy.sh -i prod1-cluster.local.conf restore <backup-name> <namespace>
 ```
-Velero recreates the resources and its node-agent rehydrates PV data from S3 via
-an init container — no manual volume copy. CRDs and cluster-scoped resources that
-were in the backup are recreated too.
+Velero recreates the resources and its node-agent rehydrates PV data from S3 via a
+`restore-wait` init container — no manual volume copy.
 
-**Order/known points**
+**Known points**
 - The **StorageClass must exist first** (step 1 provides `nfs-client`).
-- Restore **CRD-based operators before their CRs** if you split restores; a
-  single full-backup restore handles ordering itself.
-- Namespaces come back with their Secrets/ConfigMaps intact (verified: Argo CD's
+- **`--include-namespaces <ns>` restores only namespaced objects — it SKIPS
+  cluster-scoped resources** (CRDs, ClusterRoles). For operators you rebuild from
+  code that's fine; if you ever need a CRD from a backup, add
+  `--include-cluster-resources=true`.
+- **`runAsNonRoot` pods** (e.g. Argo CD): Velero's `restore-wait` helper can get
+  stuck in `Init:CreateContainerConfigError`. We ship a `fs-restore-action-config`
+  ConfigMap for it; if a pod is still stuck and its blocked volume is only scratch
+  `emptyDir`, delete the stuck pods so their controller recreates them clean —
+  their restored config/data is already in place. If the Velero restore controller
+  itself wedges on those, clear the stuck restore's finalizers and restart the
+  `velero` deployment.
+- Namespaces come back with Secrets/ConfigMaps intact (verified: Argo CD's
   `server.secretkey` restored byte-identical).
 
 ### 4. Restore NFS files (if needed) — restic
@@ -93,13 +127,24 @@ from the NFS repo (see [BACKUP-RESTORE.md](BACKUP-RESTORE.md#restore-from-the-ra
 Needs the **restic password**.
 
 ### 5. Restore OpenBao
-OpenBao can't be captured by Velero/restic (private data). Recover it from its
-**raft snapshot** and then unseal:
+OpenBao can't be captured by Velero/restic (private data). `deploy.sh` reinstalled
+a **fresh** OpenBao in step 1; now restore your old state into it from the raft
+snapshot in S3, then unseal with your **OLD** keys.
 ```bash
+# download the snapshot from S3, copy it into the pod, restore with the CURRENT
+# (fresh-install) root token — restore replaces all data incl. the old seal config:
 kubectl -n openbao cp ./bao.snap openbao-0:/tmp/bao.snap
-kubectl -n openbao exec openbao-0 -- sh -c 'BAO_TOKEN=<root> bao operator raft snapshot restore /tmp/bao.snap'
-# then unseal all pods (see the OpenBao section in the README)
+kubectl -n openbao exec openbao-0 -- sh -c 'BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN=<fresh-root> bao operator raft snapshot restore -force /tmp/bao.snap'
+# OpenBao now SEALS (it adopted the old seal). Unseal every pod with the OLD unseal
+# keys you kept off-cluster, then log in with the OLD root token:
+kubectl -n openbao exec openbao-<n> -- bao operator unseal <OLD_UNSEAL_KEY>   # x3 keys, each pod
 ```
+**Gotchas proven in the drill:**
+- **Take/copy snapshots via `/tmp` (tmpfs) inside the pod, never the NFS-backed
+  data volume** — writing a snapshot to the NFS home dir spiked memory and
+  OOM-killed the OpenBao pods, losing quorum.
+- After restore the pods are **sealed** and only the **OLD** unseal keys work
+  (that's why they must be off-cluster — see above).
 
 ### 6. Verify
 ```bash
