@@ -167,6 +167,9 @@ OPENBAO="${SET[OPENBAO]:-true}"                  # installed by default; set fal
 OPENBAO_REPLICAS="${SET[OPENBAO_REPLICAS]:-3}"
 OPENBAO_INGRESS_TYPE="${SET[OPENBAO_INGRESS_TYPE]:-ClusterIP}"
 OPENBAO_STORAGE_CLASS="${SET[OPENBAO_STORAGE_CLASS]:-}"
+# External Secrets Operator wired to OpenBao (opt-in): define secrets in OpenBao,
+# ESO syncs them into normal k8s Secrets. Needs OpenBao installed.
+EXTERNAL_SECRETS="${SET[EXTERNAL_SECRETS]:-false}"
 
 # HA auto-detect
 if [[ ${#MASTERS[@]} -gt 1 ]]; then
@@ -330,6 +333,7 @@ cmd_install(){
   [[ "$KNATIVE" == true ]] && cmd_knative
   [[ "$ARGOCD" == true ]] && cmd_argocd
   [[ "$OPENBAO" == true ]] && cmd_openbao
+  [[ "$EXTERNAL_SECRETS" == true && "$OPENBAO" == true ]] && cmd_external_secrets
   [[ "$VELERO" == true ]] && cmd_velero
   [[ "$NFS_S3_SYNC" == true ]] && cmd_nfs_s3
   [[ "$BACKUP_ALERTS" == true && "$PROMETHEUS" == true ]] && cmd_backup_alerts
@@ -407,6 +411,15 @@ cmd_nfs_s3(){
   local M0="${M_IP[0]}"; step "installing NFS->S3 sync (via $M0)"
   push_as "$SSH_USER" "$M0" "$HERE/scripts/13-nfs-s3-sync.sh"
   rsh "$M0" "sudo NFS_S3_BUCKET='$NFS_S3_BUCKET' NFS_S3_PREFIX='$NFS_S3_PREFIX' NFS_S3_STORAGE_CLASS='$NFS_S3_STORAGE_CLASS' NFS_S3_KEEP='$NFS_S3_KEEP' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' bash /tmp/13-nfs-s3-sync.sh"
+}
+
+# Install External Secrets Operator and wire it to OpenBao (define secrets in
+# OpenBao, ESO syncs them into normal k8s Secrets).
+cmd_external_secrets(){
+  [[ -f "$HERE/scripts/17-external-secrets.sh" ]] || die "scripts/17-external-secrets.sh not found"
+  local M0="${M_IP[0]}"; step "installing External Secrets Operator + OpenBao store (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/17-external-secrets.sh"
+  rsh "$M0" "sudo bash /tmp/17-external-secrets.sh"
 }
 
 # Install the automated OpenBao raft-snapshot -> S3 CronJob (no passphrase needed).
@@ -611,11 +624,12 @@ case "$ACTION" in
   backup-alerts) cmd_backup_alerts ;;
   dr-bundle)  cmd_dr_bundle ;;
   openbao-snapshot) cmd_openbao_snapshot ;;
+  external-secrets) cmd_external_secrets ;;
   dr-protect) cmd_dr_protect ;;
   backups)    cmd_backups ;;
   restore)    shift; cmd_restore "$@" ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | dr-bundle | openbao-snapshot | dr-protect | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | dr-bundle | openbao-snapshot | external-secrets | dr-protect | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
 esac

@@ -637,6 +637,38 @@ bao secrets enable -path=secret kv-v2
 bao kv put secret/demo hello=world && bao kv get secret/demo
 ```
 
+### Use OpenBao secrets as normal Kubernetes Secrets (External Secrets Operator)
+
+`kubectl create secret` stores secrets in **etcd**, not OpenBao — the two are
+separate. To make OpenBao the source of truth and still let apps consume plain
+Kubernetes Secrets, install the **External Secrets Operator (ESO)** and wire it to
+OpenBao (opt-in):
+```bash
+./deploy.sh external-secrets      # or set EXTERNAL_SECRETS=true in the inventory
+```
+This installs ESO, enables OpenBao's Kubernetes auth method with a read-only
+policy/role, and creates a `ClusterSecretStore` named `openbao`. Then you keep
+secrets in OpenBao and declare an `ExternalSecret`; ESO creates and keeps a normal
+Secret in sync:
+```bash
+# 1) secret lives in OpenBao
+bao kv put secret/myapp/db password=s3cr3t
+# 2) ESO turns it into a k8s Secret 'db-creds' your pods can use
+kubectl apply -f - <<'YAML'
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata: { name: db, namespace: default }
+spec:
+  refreshInterval: 1h
+  secretStoreRef: { name: openbao, kind: ClusterSecretStore }
+  target: { name: db-creds, creationPolicy: Owner }
+  data:
+    - secretKey: password
+      remoteRef: { key: myapp/db, property: password }
+YAML
+```
+Verified end to end: a value put in OpenBao appears as a synced `Secret`.
+
 > **Security:** move `openbao-init.json` out of the node into real secret storage
 > and delete it; losing the keys loses access, leaking them is full compromise.
 > There is **no auto-unseal** on bare metal (no cloud KMS), so after a pod/node
