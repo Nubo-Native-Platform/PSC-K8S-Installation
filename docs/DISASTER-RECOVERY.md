@@ -44,18 +44,27 @@ bucket as the backups — without the passphrase it is useless.
 ./deploy.sh -i prod1-cluster.local.conf dr-bundle      # prompts for a passphrase
 ```
 
-At the end of `./deploy.sh` (the `dr-protect` step) the daily OpenBao snapshot is
-set up for you automatically (no passphrase needed). The encrypted **key bundle is
-opt-in and OFF by default** — enable it with `DR_BUNDLE=true` in your inventory (or
-run `./deploy.sh -i <inventory> dr-bundle` any time), which prompts for a passphrase
-you choose and must keep. OpenBao raft snapshots are pushed to
-`s3://<bucket>/openbao/` **daily** by the `openbao-snapshot` CronJob
-(`./deploy.sh openbao-snapshot`), keeping the newest 4.
+At the end of `./deploy.sh` (the `dr-protect` step) two things happen automatically:
+the daily OpenBao snapshot is set up, and the DR key bundle is stored in S3. There
+are two modes:
 
-> Without the bundle, keep your recovery keys off-cluster yourself (OpenBao
-> `openbao-init.json` + the restic password) — you still need them to decrypt the
-> S3 backups. The bundle just automates storing them safely; it doesn't change that
-> you need the keys.
+- **Easy mode (default) — nothing to remember.** The bundle is stored in
+  `s3://<bucket>/dr-bundle/dr-bundle-latest.tar.gz`, protected by the bucket's own
+  encryption + private/IAM access. Recovery needs **only your AWS login**. Trade-off:
+  anyone who can *read* the bucket also gets these keys, so your AWS account is the
+  single trust boundary. Recover with:
+  ```bash
+  aws s3 cp s3://<bucket>/dr-bundle/dr-bundle-latest.tar.gz - | tar -xzf -
+  cat dr-bundle/MANIFEST.txt
+  ```
+- **Advanced mode — `DR_ENCRYPT=true`.** The bundle is AES-256 encrypted with a
+  passphrase you choose (prompted, never stored). Recovery then needs your AWS login
+  **plus** that passphrase, so a bucket read alone can't expose the keys. Enable with
+  `DR_ENCRYPT=true` in the inventory or `DR_ENCRYPT=true ./deploy.sh -i <inv> dr-bundle`.
+
+Turn the bundle off entirely with `DR_BUNDLE=false` (then keep `openbao-init.json` +
+the restic password off-cluster yourself). OpenBao raft snapshots are pushed to
+`s3://<bucket>/openbao/` **daily** by the `openbao-snapshot` CronJob, keeping 4.
 
 After that, the **only two things you keep off-cluster** are your **AWS login** and
 that **passphrase** (memorize it / store it in a password manager). Recover the

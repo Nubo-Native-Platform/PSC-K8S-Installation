@@ -23,7 +23,13 @@ DR_BUCKET="${DR_BUCKET:?set DR_BUCKET}"
 AWS_REGION="${AWS_REGION:?set AWS_REGION}"
 AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID}"
 AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}"
-DR_PASSPHRASE="${DR_PASSPHRASE:?set DR_PASSPHRASE (the one secret you keep off-cluster)}"
+# DR_ENCRYPT=true -> passphrase-encrypted bundle (advanced; you keep the passphrase).
+# DR_ENCRYPT=false (default, "easy mode") -> plain bundle, protected only by the
+# bucket's own encryption + private/IAM access. Simpler (nothing to remember) but
+# anyone who can READ the bucket also gets the recovery keys.
+DR_ENCRYPT="${DR_ENCRYPT:-false}"
+DR_PASSPHRASE="${DR_PASSPHRASE:-}"
+[[ "$DR_ENCRYPT" == true && -z "$DR_PASSPHRASE" ]] && { echo "DR_ENCRYPT=true needs DR_PASSPHRASE" >&2; exit 1; }
 DR_PREFIX="${DR_PREFIX:-dr-bundle}"
 VELERO_PREFIX="${VELERO_PREFIX:-velero}"
 NFS_S3_PREFIX="${NFS_S3_PREFIX:-nfs-restic}"
@@ -86,12 +92,19 @@ RECOVER (short form):
 EOF
 
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
-ENC="$WORK/dr-bundle-${STAMP}.tar.gz.enc"
-log "encrypting bundle (AES-256, PBKDF2)"
-tar -C "$WORK" -czf - dr-bundle \
-  | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:DR_PASSPHRASE > "$ENC"
-SIZE=$(stat -c %s "$ENC" 2>/dev/null || echo '?')
-log "encrypted bundle: ${SIZE} bytes"
+if [[ "$DR_ENCRYPT" == true ]]; then
+  EXT="enc"; OUT="$WORK/dr-bundle-${STAMP}.${EXT}"
+  log "encrypting bundle (AES-256, PBKDF2)"
+  tar -C "$WORK" -czf - dr-bundle \
+    | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -pass env:DR_PASSPHRASE > "$OUT"
+else
+  EXT="tar.gz"; OUT="$WORK/dr-bundle-${STAMP}.${EXT}"
+  warn "EASY MODE: bundle is NOT passphrase-encrypted — protected only by the bucket's"
+  warn "encryption + private/IAM access. Anyone who can READ the bucket gets these keys."
+  tar -C "$WORK" -czf "$OUT" dr-bundle
+fi
+SIZE=$(stat -c %s "$OUT" 2>/dev/null || echo '?')
+log "bundle: ${SIZE} bytes (${EXT})"
 
 log "uploading to s3://${DR_BUCKET}/${DR_PREFIX}/"
 POD="drbundle-$RANDOM"
@@ -99,23 +112,29 @@ kubectl -n "$NFS_NS" run "$POD" --restart=Never --image=amazon/aws-cli:2.15.0 \
   --env=AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" --env=AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
   --env=AWS_DEFAULT_REGION="$AWS_REGION" --command -- sleep 180 >/dev/null 2>&1
 kubectl -n "$NFS_NS" wait --for=condition=Ready "pod/$POD" --timeout=90s >/dev/null 2>&1 || die "upload pod not ready"
-# also keep a stable 'latest' copy for easy retrieval
-kubectl -n "$NFS_NS" exec -i "$POD" -- aws s3 cp - "s3://${DR_BUCKET}/${DR_PREFIX}/dr-bundle-${STAMP}.enc" < "$ENC" >/dev/null 2>&1 \
+kubectl -n "$NFS_NS" exec -i "$POD" -- aws s3 cp - "s3://${DR_BUCKET}/${DR_PREFIX}/dr-bundle-${STAMP}.${EXT}" < "$OUT" >/dev/null 2>&1 \
   || die "upload failed"
-kubectl -n "$NFS_NS" exec -i "$POD" -- aws s3 cp - "s3://${DR_BUCKET}/${DR_PREFIX}/dr-bundle-latest.enc" < "$ENC" >/dev/null 2>&1 || true
-# prune: keep only the newest 4 timestamped bundles
-kubectl -n "$NFS_NS" exec "$POD" -- sh -c "aws s3 ls s3://${DR_BUCKET}/${DR_PREFIX}/ | awk '/dr-bundle-[0-9]/{print \$4}' | sort | head -n -4 | while read f; do aws s3 rm s3://${DR_BUCKET}/${DR_PREFIX}/\$f; done" >/dev/null 2>&1 || true
+kubectl -n "$NFS_NS" exec -i "$POD" -- aws s3 cp - "s3://${DR_BUCKET}/${DR_PREFIX}/dr-bundle-latest.${EXT}" < "$OUT" >/dev/null 2>&1 || true
+# prune: keep only the newest 4 timestamped bundles (of this type)
+kubectl -n "$NFS_NS" exec "$POD" -- sh -c "aws s3 ls s3://${DR_BUCKET}/${DR_PREFIX}/ | awk '/dr-bundle-[0-9].*\\.${EXT}\$/{print \$4}' | sort | head -n -4 | while read f; do aws s3 rm s3://${DR_BUCKET}/${DR_PREFIX}/\$f; done" >/dev/null 2>&1 || true
 kubectl -n "$NFS_NS" delete pod "$POD" --wait=false >/dev/null 2>&1
 
 echo
 log "================= DR BUNDLE STORED ================="
+if [[ "$DR_ENCRYPT" == true ]]; then
 cat <<EOF
-Location : s3://${DR_BUCKET}/${DR_PREFIX}/dr-bundle-${STAMP}.enc  (+ dr-bundle-latest.enc)
+Location : s3://${DR_BUCKET}/${DR_PREFIX}/dr-bundle-latest.enc
 Keep OFF-CLUSTER: your AWS login + the passphrase (that is ALL you need).
-
-To recover the bundle after a disaster:
-  aws s3 cp s3://${DR_BUCKET}/${DR_PREFIX}/dr-bundle-latest.enc - \\
-    | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass pass:'<YOUR-PASSPHRASE>' \\
-    | tar -xzf -
-  cat dr-bundle/MANIFEST.txt
+Recover:  aws s3 cp s3://${DR_BUCKET}/${DR_PREFIX}/dr-bundle-latest.enc - \\
+            | openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -pass pass:'<PASSPHRASE>' | tar -xzf -
+          cat dr-bundle/MANIFEST.txt
 EOF
+else
+cat <<EOF
+Location : s3://${DR_BUCKET}/${DR_PREFIX}/dr-bundle-latest.tar.gz  (EASY MODE, not passphrase-encrypted)
+Keep OFF-CLUSTER: just your AWS login — nothing to remember.
+Recover:  aws s3 cp s3://${DR_BUCKET}/${DR_PREFIX}/dr-bundle-latest.tar.gz - | tar -xzf -
+          cat dr-bundle/MANIFEST.txt
+Upgrade to passphrase-encrypted later:  DR_ENCRYPT=true ./deploy.sh -i <inv> dr-bundle
+EOF
+fi

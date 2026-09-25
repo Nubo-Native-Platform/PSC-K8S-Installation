@@ -19,6 +19,43 @@ Both use the **same engine** (`k8s.sh`), so you can mix them.
 
 ---
 
+## Quickstart (easy mode — new to Kubernetes?)
+
+Three steps. Copy the inventory, add your servers + S3 details, run one command.
+Backups and disaster recovery are set up for you; there's **nothing to memorize**.
+
+```bash
+# 1. describe your cluster (copy the sample, edit IPs + S3 creds; keep it private)
+cp prod1-cluster.conf prod1-cluster.local.conf
+#    edit prod1-cluster.local.conf: node IPs, and add VELERO_BUCKET / AWS_REGION /
+#    AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for backups.
+
+# 2. build everything (cluster + storage + daily S3 backups + DR bundle)
+./deploy.sh -i prod1-cluster.local.conf check     # verify it can reach your servers
+./deploy.sh -i prod1-cluster.local.conf           # build it all
+
+# 3. that's it. Your kubeconfig is saved locally as ./kubeconfig
+KUBECONFIG=./kubeconfig kubectl get nodes
+```
+
+**Backups** run daily to S3 automatically (Velero + NFS + OpenBao), keeping the
+newest 4. **To recover after losing everything**, you only need your **AWS login**:
+
+```bash
+# list what you can restore
+./deploy.sh -i prod1-cluster.local.conf backups
+# rebuild fresh servers, run step 2 again, then restore your apps:
+./deploy.sh -i prod1-cluster.local.conf restore <backup-name>
+```
+
+The recovery keys are stored for you in S3 (`dr-bundle/`). **Advanced users** who
+want those keys passphrase-encrypted (so a bucket read can't expose them) set
+`DR_ENCRYPT=true` — see [Backups to S3](#backups-to-s3-velero--raw-nfs-sync) and
+[docs/DISASTER-RECOVERY.md](docs/DISASTER-RECOVERY.md). Everything below is the
+detailed/advanced reference.
+
+---
+
 ## Table of contents
 - [What this can do](#what-this-can-do)
 - [How it works](#how-it-works)

@@ -145,8 +145,9 @@ AWS_ACCESS_KEY_ID="${SET[AWS_ACCESS_KEY_ID]:-}"; AWS_SECRET_ACCESS_KEY="${SET[AW
 # OpenBao + S3 are configured). And the encrypted DR key-bundle (needs a passphrase).
 OPENBAO_SNAPSHOT="${SET[OPENBAO_SNAPSHOT]:-true}"
 BAO_SNAP_SCHEDULE="${SET[BAO_SNAP_SCHEDULE]:-0 2 * * *}"; BAO_SNAP_KEEP="${SET[BAO_SNAP_KEEP]:-4}"
-DR_BUNDLE="${SET[DR_BUNDLE]:-false}"           # opt-in: set true to be offered the encrypted DR key bundle at install
-DR_PASSPHRASE="${DR_PASSPHRASE:-}"             # env only (never inventory); prompted if empty
+DR_BUNDLE="${SET[DR_BUNDLE]:-true}"            # store the DR key bundle in S3 (easy mode: plain, nothing to remember)
+DR_ENCRYPT="${SET[DR_ENCRYPT]:-false}"         # advanced: true = passphrase-encrypt the bundle (you keep the passphrase)
+DR_PASSPHRASE="${DR_PASSPHRASE:-}"             # env only (never inventory); prompted if DR_ENCRYPT and empty
 
 # ---- Knative + Istio (optional) --------------------------------------------
 KNATIVE="${SET[KNATIVE]:-true}"                  # installed by default; set false to skip
@@ -419,60 +420,57 @@ cmd_openbao_snapshot(){
   rsh "$M0" "sudo BAO_SNAP_BUCKET='$bucket' BAO_SNAP_PREFIX='openbao' BAO_SNAP_SCHEDULE='$BAO_SNAP_SCHEDULE' BAO_SNAP_KEEP='$BAO_SNAP_KEEP' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' bash /tmp/16-openbao-snapshot.sh"
 }
 
-# Interactive DR-protection setup run at the end of install: by default it sets up
-# the automated OpenBao snapshot and offers to store the encrypted DR key-bundle.
-# The user must ACCEPT the bundle (and remember the passphrase) or opt out to do it
-# manually later. Skipped automatically if S3 isn't configured.
+# DR-protection run at the end of install. Sets up the automated OpenBao snapshot
+# (no passphrase) and — by default (easy mode) — stores the DR key bundle in S3 so
+# recovery needs nothing but an AWS login. With DR_ENCRYPT=true it becomes the
+# advanced, passphrase-encrypted bundle (asks you to accept + own a passphrase).
+# Skipped automatically if S3 isn't configured.
 cmd_dr_protect(){
   local bucket="${VELERO_BUCKET:-$NFS_S3_BUCKET}"
   [[ -n "$bucket" && -n "$AWS_REGION" && -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] || {
     warn "S3 not configured — skipping DR protection (run './deploy.sh openbao-snapshot' and './deploy.sh dr-bundle' later)"; return 0; }
   # 1. OpenBao snapshot: automatic, no passphrase.
   if [[ "$OPENBAO" == true && "$OPENBAO_SNAPSHOT" == true ]]; then cmd_openbao_snapshot || warn "openbao snapshot setup had issues"; fi
-  # 2. Encrypted DR bundle: requires the operator to accept + own a passphrase.
-  [[ "$DR_BUNDLE" == true ]] || { log "DR key bundle disabled (default). Enable with DR_BUNDLE=true, or store it any time: ./deploy.sh -i <inv> dr-bundle"; return 0; }
-  echo
-  step "DR key bundle"
-  cat <<EOF
-This stores your recovery KEYS in S3, encrypted with a passphrase you choose:
-  - OpenBao unseal keys + root token, restic repo password, inventory, runbook
-  - uploaded to s3://${bucket}/dr-bundle/ (AES-256; useless without the passphrase)
-
-IMPORTANT: at recovery time you will need TWO things, kept OFF the cluster:
-  1) your AWS login      2) THIS passphrase  (store it in a password manager)
+  # 2. DR key bundle.
+  [[ "$DR_BUNDLE" == true ]] || { log "DR key bundle disabled. Store it any time: ./deploy.sh -i <inv> dr-bundle"; return 0; }
+  if [[ "$DR_ENCRYPT" == true ]]; then
+    echo; step "DR key bundle (encrypted)"
+    cat <<EOF
+Stores your recovery KEYS in S3, encrypted with a passphrase you choose.
+At recovery you need TWO things kept OFF the cluster:
+  1) your AWS login    2) THIS passphrase (store it in a password manager)
 If you lose the passphrase, this bundle cannot be recovered.
 EOF
-  local ans=""
-  if [[ -n "$DR_PASSPHRASE" ]]; then ans=y; else
-    read -rp "Create and store the encrypted DR bundle now? [Y/n] " ans; ans="${ans:-y}"
-  fi
-  if [[ "$ans" =~ ^[Yy]$ ]]; then
-    cmd_dr_bundle
+    local ans=""
+    if [[ -n "$DR_PASSPHRASE" ]]; then ans=y; else read -rp "Create the encrypted DR bundle now? [Y/n] " ans; ans="${ans:-y}"; fi
+    [[ "$ans" =~ ^[Yy]$ ]] && cmd_dr_bundle || warn "skipped. Later:  DR_ENCRYPT=true ./deploy.sh -i <inv> dr-bundle"
   else
-    warn "skipped. Store it yourself later with:  ./deploy.sh -i <inventory> dr-bundle"
+    # Easy mode: store the bundle in S3 automatically, nothing to remember.
+    step "DR key bundle (easy mode — stored in S3, recovery needs only your AWS login)"
+    cmd_dr_bundle
   fi
 }
 
-# Build + upload the encrypted DR "break-glass" bundle (keys + inventory + runbook)
-# to S3. After a disaster you only need your AWS login + the passphrase.
+# Build + upload the DR "break-glass" bundle (keys + inventory + runbook) to S3.
+# Easy mode (default): plain, protected by the bucket's encryption + private access
+# (recovery needs only the AWS login). DR_ENCRYPT=true: passphrase-encrypted.
 cmd_dr_bundle(){
   [[ -f "$HERE/scripts/15-dr-bundle.sh" ]] || die "scripts/15-dr-bundle.sh not found"
   local bucket="${VELERO_BUCKET:-$NFS_S3_BUCKET}"
   [[ -n "$bucket" && -n "$AWS_REGION" && -n "$AWS_ACCESS_KEY_ID" && -n "$AWS_SECRET_ACCESS_KEY" ]] \
     || die "DR bundle needs a bucket (VELERO_BUCKET/NFS_S3_BUCKET), AWS_REGION and AWS creds (put them in a private *.local.conf)"
-  # Passphrase: never stored. Take DR_PASSPHRASE from env, else prompt (hidden).
   local pp="${DR_PASSPHRASE:-}"
-  if [[ -z "$pp" ]]; then
+  if [[ "$DR_ENCRYPT" == true && -z "$pp" ]]; then
     read -rsp "DR bundle passphrase (keep this OFF-cluster; you need it to recover): " pp; echo
     local pp2; read -rsp "Confirm passphrase: " pp2; echo
     [[ "$pp" == "$pp2" ]] || die "passphrases did not match"
+    [[ -n "$pp" ]] || die "empty passphrase"
   fi
-  [[ -n "$pp" ]] || die "empty passphrase"
-  local M0="${M_IP[0]}"; step "building encrypted DR bundle -> s3://$bucket/dr-bundle (via $M0)"
+  local M0="${M_IP[0]}"; step "building DR bundle (encrypt=$DR_ENCRYPT) -> s3://$bucket/dr-bundle (via $M0)"
   push_as "$SSH_USER" "$M0" "$HERE/scripts/15-dr-bundle.sh"
   push_as "$SSH_USER" "$M0" "$INV"
   [[ -f "$HERE/docs/DISASTER-RECOVERY.md" ]] && push_as "$SSH_USER" "$M0" "$HERE/docs/DISASTER-RECOVERY.md"
-  rsh "$M0" "sudo DR_BUCKET='$bucket' DR_PREFIX='dr-bundle' VELERO_PREFIX='$VELERO_PREFIX' NFS_S3_PREFIX='$NFS_S3_PREFIX' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' DR_PASSPHRASE='$pp' INVENTORY_FILE='/tmp/$(basename "$INV")' RUNBOOK_FILE='/tmp/DISASTER-RECOVERY.md' bash /tmp/15-dr-bundle.sh"
+  rsh "$M0" "sudo DR_BUCKET='$bucket' DR_PREFIX='dr-bundle' DR_ENCRYPT='$DR_ENCRYPT' VELERO_PREFIX='$VELERO_PREFIX' NFS_S3_PREFIX='$NFS_S3_PREFIX' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' DR_PASSPHRASE='$pp' INVENTORY_FILE='/tmp/$(basename "$INV")' RUNBOOK_FILE='/tmp/DISASTER-RECOVERY.md' bash /tmp/15-dr-bundle.sh"
   # clean the staged (plaintext) inventory/runbook off the master
   rsh "$M0" "rm -f /tmp/$(basename "$INV") /tmp/DISASTER-RECOVERY.md /tmp/15-dr-bundle.sh" 2>/dev/null || true
 }
