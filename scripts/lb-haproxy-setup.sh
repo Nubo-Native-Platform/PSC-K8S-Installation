@@ -27,6 +27,18 @@ LB_PORT="${LB_PORT:-6443}"
 [[ $# -ge 1 ]] || die "usage: $0 <master1-ip> [master2-ip] [master3-ip] ..."
 MASTERS=("$@")
 
+# Optional: also load-balance the NGINX ingress (HTTP/HTTPS) from this host to the
+# ingress-controller NodePorts on the cluster nodes, so :80/:443 on the LB reach
+# your Ingresses. Enable with INGRESS_LB=true and list the target nodes.
+#   INGRESS_LB=true INGRESS_NODES="192.168.18.64 192.168.18.65 ..." \
+#   INGRESS_HTTP_NODEPORT=30080 INGRESS_HTTPS_NODEPORT=30443 ./lb-haproxy-setup.sh <masters...>
+INGRESS_LB="${INGRESS_LB:-false}"
+INGRESS_HTTP_NODEPORT="${INGRESS_HTTP_NODEPORT:-30080}"
+INGRESS_HTTPS_NODEPORT="${INGRESS_HTTPS_NODEPORT:-30443}"
+read -r -a INGRESS_NODES <<< "${INGRESS_NODES:-}"
+# Default the ingress backends to the masters if no explicit nodes were given.
+[[ "$INGRESS_LB" == true && ${#INGRESS_NODES[@]} -eq 0 ]] && INGRESS_NODES=("${MASTERS[@]}")
+
 pm(){ command -v apt-get >/dev/null && echo apt || { command -v dnf >/dev/null && echo dnf || die "need apt or dnf"; }; }
 P="$(pm)"
 
@@ -67,6 +79,33 @@ EOF
     echo "    server master${i} ${ip}:6443 check fall 3 rise 2"
     i=$((i+1))
   done
+
+  # NGINX ingress passthrough (TCP): :80 and :443 -> ingress NodePorts on the nodes.
+  # TCP mode preserves TLS/SNI (nginx terminates TLS) and lets ACME HTTP-01 (:80) work.
+  if [[ "$INGRESS_LB" == true ]]; then
+    cat <<EOF
+
+frontend ingress-http
+    bind *:80
+    default_backend ingress-http-nodes
+
+frontend ingress-https
+    bind *:443
+    default_backend ingress-https-nodes
+
+backend ingress-http-nodes
+    option tcp-check
+    balance roundrobin
+EOF
+    i=1; for ip in "${INGRESS_NODES[@]}"; do echo "    server node${i} ${ip}:${INGRESS_HTTP_NODEPORT} check fall 3 rise 2"; i=$((i+1)); done
+    cat <<EOF
+
+backend ingress-https-nodes
+    option tcp-check
+    balance roundrobin
+EOF
+    i=1; for ip in "${INGRESS_NODES[@]}"; do echo "    server node${i} ${ip}:${INGRESS_HTTPS_NODEPORT} check fall 3 rise 2"; i=$((i+1)); done
+  fi
 } >/etc/haproxy/haproxy.cfg
 
 # SELinux: allow haproxy to bind/connect on non-standard ports if enforcing.
@@ -79,10 +118,11 @@ systemctl enable haproxy >/dev/null 2>&1 || true
 systemctl restart haproxy
 
 # firewall
+FW_PORTS=("${LB_PORT}"); [[ "$INGRESS_LB" == true ]] && FW_PORTS+=(80 443)
 if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-  ufw allow "${LB_PORT}/tcp" >/dev/null 2>&1 || true
+  for p in "${FW_PORTS[@]}"; do ufw allow "${p}/tcp" >/dev/null 2>&1 || true; done
 elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
-  firewall-cmd --permanent --add-port="${LB_PORT}/tcp" >/dev/null 2>&1 || true
+  for p in "${FW_PORTS[@]}"; do firewall-cmd --permanent --add-port="${p}/tcp" >/dev/null 2>&1 || true; done
   firewall-cmd --reload >/dev/null 2>&1 || true
 fi
 

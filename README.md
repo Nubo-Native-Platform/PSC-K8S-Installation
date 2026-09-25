@@ -669,6 +669,45 @@ YAML
 ```
 Verified end to end: a value put in OpenBao appears as a synced `Secret`.
 
+## Ingress, TLS, and security scanning
+
+### NGINX Ingress (NodePort behind HAProxy)
+Installs the NGINX ingress controller as a **NodePort** service (`30080`/`30443`);
+the HAProxy LB on the proxy host forwards **:80/:443** to those NodePorts, so it is
+the L4 load balancer in front of your Ingresses.
+```bash
+./deploy.sh ingress-nginx        # on by default (INGRESS_NGINX=true)
+```
+During a full `./deploy.sh`, HAProxy is auto-configured with `INGRESS_LB=true`
+pointing at the workers. Create an Ingress with `ingressClassName: nginx` and reach
+it via the LB. Verified: `curl -H 'Host: app.example' http://<LB-IP>/` routes through
+HAProxy to the ingress to your app.
+
+### TLS with Let's Encrypt (cert-manager)
+```bash
+./deploy.sh cert-manager                       # installs cert-manager
+ACME_EMAIL=you@example.com ./deploy.sh cert-manager   # also creates LE ClusterIssuers
+```
+Set `ACME_EMAIL` (in the inventory or the environment) to create the
+`letsencrypt-staging` and `letsencrypt-prod` ClusterIssuers (HTTP-01 via nginx). Then
+annotate an Ingress `cert-manager.io/cluster-issuer: letsencrypt-prod` and add a
+`spec.tls` block. **Real issuance needs a public DNS name resolving to the LB and the
+LB reachable from the internet on :80** — on a private lab the plumbing installs but
+Let's Encrypt can't validate.
+
+### Kubescape (security & compliance)
+```bash
+./deploy.sh kubescape            # on by default (KUBESCAPE=true)
+```
+Installs the Kubescape operator for continuous config/compliance and image
+vulnerability scanning. Results are CRDs:
+```bash
+kubectl get configurationscansummaries -A           # cluster compliance
+kubectl get workloadconfigurationscansummaries -A   # per-workload findings
+kubectl get vulnerabilitymanifestsummaries -A        # image vulnerabilities
+kubectl -n kubescape create job scan-now --from=cronjob/kubescape-scheduler  # on-demand
+```
+
 > **Security:** move `openbao-init.json` out of the node into real secret storage
 > and delete it; losing the keys loses access, leaking them is full compromise.
 > There is **no auto-unseal** on bare metal (no cloud KMS), so after a pod/node
