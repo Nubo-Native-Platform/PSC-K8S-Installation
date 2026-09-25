@@ -15,7 +15,7 @@
 #   VELERO_VERSION        default v1.16.1
 #   VELERO_PLUGIN_AWS     default v1.12.1
 #   VELERO_SCHEDULE       default "0 3 * * *" (daily 03:00); "" to skip the schedule
-#   VELERO_KEEP           default 15 — ALWAYS keep the newest N backups (count-based;
+#   VELERO_KEEP           default 4 — ALWAYS keep the newest N backups (count-based;
 #                         an outage can't age them away). A pruner CronJob enforces it.
 #   VELERO_TTL            default 720h0m0s (30d) — safety backstop only: backups are
 #                         removed once they are BOTH beyond the newest N and 30d old.
@@ -33,7 +33,7 @@ AWS_REGION="${AWS_REGION:?set AWS_REGION}"
 AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID}"
 AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY}"
 VELERO_SCHEDULE="${VELERO_SCHEDULE:-0 3 * * *}"
-VELERO_KEEP="${VELERO_KEEP:-15}"
+VELERO_KEEP="${VELERO_KEEP:-4}"
 VELERO_TTL="${VELERO_TTL:-720h0m0s}"
 VELERO_EXCLUDE_NAMESPACES="${VELERO_EXCLUDE_NAMESPACES:-monitoring}"
 export KUBECONFIG="${KUBECONFIG:-/etc/kubernetes/admin.conf}"

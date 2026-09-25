@@ -640,14 +640,14 @@ app's private 0600 data, e.g. OpenBao's raft files) — the job still succeeds. 
 those, rely on Velero or the app's own snapshot (OpenBao: `bao operator raft
 snapshot save`).
 
-> Inventory keys: `VELERO`, `VELERO_BUCKET`, `VELERO_KEEP` (default 15),
+> Inventory keys: `VELERO`, `VELERO_BUCKET`, `VELERO_KEEP` (default 4),
 > `VELERO_TTL` (default 30d backstop), `VELERO_EXCLUDE_NAMESPACES` (default
 > `monitoring`), `NFS_S3_SYNC`, `NFS_S3_BUCKET`, `NFS_S3_PREFIX`, `NFS_S3_KEEP`
 > (default 4), `NFS_S3_STORAGE_CLASS`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`,
 > `AWS_SECRET_ACCESS_KEY`.
 
 **Retention & cost (count-based + 30-day backstop):** a pruner always keeps the
-**newest 15 Velero** backups (`VELERO_KEEP`) and the **newest 4 NFS daily
+**newest 4 Velero** backups (`VELERO_KEEP`) and the **newest 4 NFS daily
 snapshots** (`NFS_S3_KEEP`) — so an outage can't age them away. A **30-day**
 Velero TTL / S3 lifecycle is only a backstop (clears backups if they've been
 abandoned that long). `monitoring` is excluded from Velero and `archived-*` from

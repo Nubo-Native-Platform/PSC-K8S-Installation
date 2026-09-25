@@ -45,7 +45,7 @@ age-based backstop**. Count-based is deliberate: an outage can't age your
 backups away — you always have the last N until newer ones replace them.
 
 - **Velero**: a pruner CronJob (`velero-backup-pruner`) **always keeps the newest
-  15** daily backups (`VELERO_KEEP=15`); the schedule TTL (`VELERO_TTL=720h`, 30d)
+  4** daily backups (`VELERO_KEEP=4`); the schedule TTL (`VELERO_TTL=720h`, 30d)
   is only a backstop so truly abandoned backups clear after 30 days. The
   `monitoring` namespace is excluded (large/reproducible Prometheus TSDB).
 - **NFS→S3**: a **restic** repository (`nfs-restic/`) with **deduplication +
@@ -56,7 +56,7 @@ backups away — you always have the last N until newer ones replace them.
   No S3 lifecycle on the repo (age-expiry would corrupt it); restic's count-based
   forget is the only retention. The `archived-*` dirs are excluded.
 
-So at any moment you have the last **15 Velero** and last **4 NFS** backups — and
+So at any moment you have the last **4 Velero** and last **4 NFS** backups — and
 if backups stop entirely, the last good ones survive up to **30 days** (then the
 backstop clears them). The alerts below tell you backups have stopped.
 - **Storage class**: objects use `STANDARD`. For 3–15 day retention this is the
@@ -94,7 +94,7 @@ for a *separate* long-term/compliance archive (e.g. a monthly backup kept a year
 ### Outages
 
 Because retention is **count-based** (keep newest N), a cluster outage does **not**
-age your backups away — the last 15 Velero / last 4 NFS snapshots remain. The
+age your backups away — the last 4 Velero / last 4 NFS snapshots remain. The
 **30-day backstop** only removes them if backups have been stopped that long
 (both pruners and the S3 lifecycle only delete beyond the kept count, and the
 lifecycle/TTL are set to 30 days). Notes:

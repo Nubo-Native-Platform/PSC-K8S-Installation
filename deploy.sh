@@ -133,7 +133,7 @@ VELERO="${SET[VELERO]:-false}"                 # Velero -> S3 (cluster + PV data
 NFS_S3_SYNC="${SET[NFS_S3_SYNC]:-false}"       # raw NFS export -> S3 CronJob
 VELERO_BUCKET="${SET[VELERO_BUCKET]:-}"
 VELERO_PREFIX="${SET[VELERO_PREFIX]:-velero}"                   # Velero's own bucket prefix (must not share root with restic)
-VELERO_KEEP="${SET[VELERO_KEEP]:-15}"                           # always keep newest 15 (count)
+VELERO_KEEP="${SET[VELERO_KEEP]:-4}"                            # always keep newest 4 (count)
 VELERO_TTL="${SET[VELERO_TTL]:-720h0m0s}"                       # 30d backstop only
 VELERO_EXCLUDE_NAMESPACES="${SET[VELERO_EXCLUDE_NAMESPACES]:-monitoring}"
 NFS_S3_BUCKET="${SET[NFS_S3_BUCKET]:-}"; NFS_S3_PREFIX="${SET[NFS_S3_PREFIX]:-nfs-restic}"
