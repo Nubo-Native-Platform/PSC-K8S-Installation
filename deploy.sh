@@ -145,7 +145,7 @@ AWS_ACCESS_KEY_ID="${SET[AWS_ACCESS_KEY_ID]:-}"; AWS_SECRET_ACCESS_KEY="${SET[AW
 # OpenBao + S3 are configured). And the encrypted DR key-bundle (needs a passphrase).
 OPENBAO_SNAPSHOT="${SET[OPENBAO_SNAPSHOT]:-true}"
 BAO_SNAP_SCHEDULE="${SET[BAO_SNAP_SCHEDULE]:-0 2 * * *}"; BAO_SNAP_KEEP="${SET[BAO_SNAP_KEEP]:-4}"
-DR_BUNDLE="${SET[DR_BUNDLE]:-true}"            # offer to store the encrypted DR bundle during install
+DR_BUNDLE="${SET[DR_BUNDLE]:-false}"           # opt-in: set true to be offered the encrypted DR key bundle at install
 DR_PASSPHRASE="${DR_PASSPHRASE:-}"             # env only (never inventory); prompted if empty
 
 # ---- Knative + Istio (optional) --------------------------------------------
@@ -430,7 +430,7 @@ cmd_dr_protect(){
   # 1. OpenBao snapshot: automatic, no passphrase.
   if [[ "$OPENBAO" == true && "$OPENBAO_SNAPSHOT" == true ]]; then cmd_openbao_snapshot || warn "openbao snapshot setup had issues"; fi
   # 2. Encrypted DR bundle: requires the operator to accept + own a passphrase.
-  [[ "$DR_BUNDLE" == true ]] || { warn "DR_BUNDLE=false — skipping the encrypted key bundle"; return 0; }
+  [[ "$DR_BUNDLE" == true ]] || { log "DR key bundle disabled (default). Enable with DR_BUNDLE=true, or store it any time: ./deploy.sh -i <inv> dr-bundle"; return 0; }
   echo
   step "DR key bundle"
   cat <<EOF

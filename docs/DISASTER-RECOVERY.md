@@ -44,12 +44,18 @@ bucket as the backups — without the passphrase it is useless.
 ./deploy.sh -i prod1-cluster.local.conf dr-bundle      # prompts for a passphrase
 ```
 
-This runs **automatically at the end of `./deploy.sh`** (the `dr-protect` step): it
-sets up the daily OpenBao snapshot for you (no passphrase needed) and then **asks
-you to accept** storing the encrypted key bundle, prompting for a passphrase. Say
-no and it prints how to do it later; set `DR_BUNDLE=false` to skip the prompt.
-OpenBao raft snapshots are pushed to `s3://<bucket>/openbao/` **daily** by the
-`openbao-snapshot` CronJob (`./deploy.sh openbao-snapshot`), keeping the newest 4.
+At the end of `./deploy.sh` (the `dr-protect` step) the daily OpenBao snapshot is
+set up for you automatically (no passphrase needed). The encrypted **key bundle is
+opt-in and OFF by default** — enable it with `DR_BUNDLE=true` in your inventory (or
+run `./deploy.sh -i <inventory> dr-bundle` any time), which prompts for a passphrase
+you choose and must keep. OpenBao raft snapshots are pushed to
+`s3://<bucket>/openbao/` **daily** by the `openbao-snapshot` CronJob
+(`./deploy.sh openbao-snapshot`), keeping the newest 4.
+
+> Without the bundle, keep your recovery keys off-cluster yourself (OpenBao
+> `openbao-init.json` + the restic password) — you still need them to decrypt the
+> S3 backups. The bundle just automates storing them safely; it doesn't change that
+> you need the keys.
 
 After that, the **only two things you keep off-cluster** are your **AWS login** and
 that **passphrase** (memorize it / store it in a password manager). Recover the
