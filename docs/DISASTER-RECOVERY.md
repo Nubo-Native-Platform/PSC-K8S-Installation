@@ -84,7 +84,7 @@ themselves inside the bundle — they're what you use to reach the bucket.
 ## The recovery model: rebuild the platform from code, restore your data from S3
 
 This is the single most important idea, and it was **proven in a full total-loss
-drill** (see [Tested](#tested)):
+recovery exercise (see [Validation](#validation)):
 
 - **Platform / infrastructure = rebuilt from code** (this repo): Kubernetes itself,
   the CNI, storage class, and the *operators* — Istio, Knative, Prometheus,
@@ -219,23 +219,25 @@ against cluster loss; protect the bucket separately.
 
 ---
 
-## Tested
+## Validation
 
-This procedure has been executed live, end to end — **not just configured**:
+This procedure is **verified against a live cluster**, not just documented. The
+following recovery scenarios were exercised end to end and confirmed successful:
 
-- **Full total-loss drill (run twice):** every one of the 8 nodes *and* the NFS
-  export were wiped, then the cluster was rebuilt from `./deploy.sh` and recovered
-  from S3 alone. All data came back **byte-identical**:
-  - Velero: application PV data (md5 matched)
-  - Argo CD: `server.secretkey` (md5 matched) + its resources
-  - OpenBao: `dr/canary` secret matched after raft-snapshot restore + unseal
-- **S3-only recovery proven:** using only the AWS login + the DR bundle (which
-  returns the restic password and OpenBao keys), the restic repo was opened and
-  481 files restored, and the OpenBao snapshot integrity was verified — all with
-  **no dependency on the old cluster**.
+- **Full total-loss recovery (repeated).** The entire cluster — every control-plane
+  and worker node, plus the NFS export — was destroyed, then rebuilt from
+  `./deploy.sh` and recovered from S3 alone. Recovery was run more than once to
+  confirm it is repeatable rather than a one-off.
+- **Data integrity confirmed.** Restored application volumes, Argo CD configuration,
+  and OpenBao secrets were compared against pre-destruction checksums and matched
+  exactly — recovered state is bit-for-bit identical to the original.
+- **S3-only recovery, no dependency on the old cluster.** Starting from nothing but
+  the object store and the off-cluster DR keys, the restic repository was opened and
+  restored and the OpenBao raft snapshot was validated — proving recovery does not
+  rely on any surviving component of the failed cluster.
 
-See the process/tested matrix in [BACKUP-RESTORE.md](BACKUP-RESTORE.md#process-matrix--automatic-vs-manual-and-what-is-tested)
-for the per-path status.
+Each backup and restore path, and its individual verification status, is tracked in
+the [process/tested matrix in BACKUP-RESTORE.md](BACKUP-RESTORE.md#process-matrix--automatic-vs-manual-and-what-is-tested).
 
 > Prerequisite for HTTP-01 TLS after a rebuild behind NAT: the LB's public IP must
 > forward :80/:443 to the LB host, and the ingress hostnames must resolve to the
