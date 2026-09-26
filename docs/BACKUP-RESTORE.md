@@ -234,22 +234,22 @@ live-test status. **Tested** = actually executed on this cluster and verified
 
 | Process | Automatic | Manual | Tested |
 |---|---|---|---|
-| Velero — cluster resources + PV data → S3 | ✅ daily 03:00 (`schedule/daily-all`) | ✅ `velero backup create <name> --default-volumes-to-fs-backup` | ✅ verified (Completed, all namespaces incl. empty ones) |
-| Velero retention (keep newest 4) | ✅ pruner CronJob 03:45 | — | ✅ config verified (`VELERO_KEEP=4`) |
-| restic — raw NFS export → S3 | ✅ daily 03:30 (`cronjob/nfs-s3-sync`) | ✅ `kubectl -n nfs-provisioner create job run --from=cronjob/nfs-s3-sync` | ✅ verified (snapshot written, keep-last-4) |
-| OpenBao — raft snapshot → S3 | ✅ daily 02:00 (`cronjob/openbao-snapshot`) | ✅ `./deploy.sh openbao-snapshot` or `create job --from=cronjob/openbao-snapshot` | ✅ verified (valid snapshot, integrity OK) |
-| DR key bundle (keys + inventory + runbook) → S3 | — (on-demand) | ✅ `./deploy.sh dr-bundle` (easy mode) / `DR_ENCRYPT=true …` | ✅ verified (recovered + extracted from S3) |
-| Backup-stopped alerts | ✅ Prometheus rules | ✅ `./deploy.sh backup-alerts` | ✅ installed |
+| Velero — cluster resources + PV data → S3 | daily 03:00 (`schedule/daily-all`) | `velero backup create <name> --default-volumes-to-fs-backup` | verified (Completed, all namespaces incl. empty ones) |
+| Velero retention (keep newest 4) | pruner CronJob 03:45 | — | config verified (`VELERO_KEEP=4`) |
+| restic — raw NFS export → S3 | daily 03:30 (`cronjob/nfs-s3-sync`) | `kubectl -n nfs-provisioner create job run --from=cronjob/nfs-s3-sync` | verified (snapshot written, keep-last-4) |
+| OpenBao — raft snapshot → S3 | daily 02:00 (`cronjob/openbao-snapshot`) | `./deploy.sh openbao-snapshot` or `create job --from=cronjob/openbao-snapshot` | verified (valid snapshot, integrity OK) |
+| DR key bundle (keys + inventory + runbook) → S3 | — (on-demand) | `./deploy.sh dr-bundle` (easy mode) / `DR_ENCRYPT=true …` | verified (recovered + extracted from S3) |
+| Backup-stopped alerts | Prometheus rules | `./deploy.sh backup-alerts` | installed |
 
 ### Restore
 
 | Process | Automatic | Manual | Tested |
 |---|---|---|---|
-| Velero — restore a namespace / whole cluster | — | ✅ `./deploy.sh restore <backup> [ns]` or `velero restore create --from-backup <b>` | ✅ **byte-identical** (canary PV data md5 matched) |
-| restic — file/volume restore from S3 | — | ✅ `restic restore latest --target …` (see above) | ✅ verified (481 files restored using the off-cluster password) |
-| OpenBao — raft snapshot restore + unseal | — | ✅ `bao operator raft snapshot restore` + unseal with saved keys | ✅ verified (`dr/canary` secret matched after restore) |
-| DR bundle recovery (get keys back) | — | ✅ `aws s3 cp … | tar -xzf -` (or `openssl` decrypt if encrypted) | ✅ verified (all keys/inventory/runbook recovered) |
-| **Full cluster loss → rebuild from S3** | — | ✅ `./deploy.sh` (platform) + full Velero restore + OpenBao snapshot | ✅ **verified twice** — every node + NFS wiped, rebuilt from S3, all data byte-identical |
+| Velero — restore a namespace / whole cluster | — | `./deploy.sh restore <backup> [ns]` or `velero restore create --from-backup <b>` | verified (PV data checksum-matched the original) |
+| restic — file/volume restore from S3 | — | `restic restore latest --target …` (see above) | verified (files restored using the off-cluster password) |
+| OpenBao — raft snapshot restore + unseal | — | `bao operator raft snapshot restore` + unseal with saved keys | verified (secrets matched after restore) |
+| DR bundle recovery (get keys back) | — | `aws s3 cp … | tar -xzf -` (or `openssl` decrypt if encrypted) | verified (all keys/inventory/runbook recovered) |
+| **Full cluster loss → rebuild from S3** | — | `./deploy.sh` (platform) + full Velero restore + OpenBao snapshot | verified (repeated) — all nodes + NFS wiped, rebuilt from S3, data checksum-matched |
 
 > Note: neither Velero (node-agent) nor restic can read OpenBao's private 0600 files
 > over the squashed NFS mount — OpenBao is protected by its **raft snapshot** instead
