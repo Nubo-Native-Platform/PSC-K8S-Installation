@@ -229,7 +229,6 @@ This procedure has been executed live, end to end — **not just configured**:
   - Velero: application PV data (md5 matched)
   - Argo CD: `server.secretkey` (md5 matched) + its resources
   - OpenBao: `dr/canary` secret matched after raft-snapshot restore + unseal
-  - empty namespaces (e.g. `test-rabi`) were captured and restored
 - **S3-only recovery proven:** using only the AWS login + the DR bundle (which
   returns the restic password and OpenBao keys), the restic repo was opened and
   481 files restored, and the OpenBao snapshot integrity was verified — all with

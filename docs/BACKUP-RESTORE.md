@@ -246,7 +246,6 @@ live-test status. **Tested** = actually executed on this cluster and verified
 | Process | Automatic | Manual | Tested |
 |---|---|---|---|
 | Velero — restore a namespace / whole cluster | — | ✅ `./deploy.sh restore <backup> [ns]` or `velero restore create --from-backup <b>` | ✅ **byte-identical** (canary PV data md5 matched) |
-| Velero — restore an empty namespace | — | ✅ (part of a full restore) | ✅ verified (`test-rabi` came back) |
 | restic — file/volume restore from S3 | — | ✅ `restic restore latest --target …` (see above) | ✅ verified (481 files restored using the off-cluster password) |
 | OpenBao — raft snapshot restore + unseal | — | ✅ `bao operator raft snapshot restore` + unseal with saved keys | ✅ verified (`dr/canary` secret matched after restore) |
 | DR bundle recovery (get keys back) | — | ✅ `aws s3 cp … | tar -xzf -` (or `openssl` decrypt if encrypted) | ✅ verified (all keys/inventory/runbook recovered) |
