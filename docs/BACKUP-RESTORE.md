@@ -224,16 +224,37 @@ After restore, unseal the pods again (see the OpenBao section in the README).
 
 ---
 
-## Tested (disaster-recovery drill)
+## Process matrix — automatic vs manual, and what is tested
 
-Verified end-to-end on this cluster: deployed a stateful "critical-app"
-(StatefulSet, 2 replicas, a PVC each) with known data, backed it up with **both**
-Velero and restic, then **destroyed the entire namespace** (pods, PVCs, PVs, data
-all gone) and restored:
-- **Velero restore** brought back the StatefulSet + both PVCs, and the data was
-  **byte-identical** on both replicas.
-- **restic restore** pulled the same files back from S3, **byte-identical**.
+Every backup and restore path, whether it runs on a schedule or by hand, and its
+live-test status. **Tested** = actually executed on this cluster and verified
+(data byte-identical / secret matched), not just configured.
 
-Also confirmed: neither Velero (node-agent) nor restic can read OpenBao's private
-0600 files over the squashed NFS mount — back OpenBao up with its **raft
-snapshot** (above).
+### Backup
+
+| Process | Automatic | Manual | Tested |
+|---|---|---|---|
+| Velero — cluster resources + PV data → S3 | ✅ daily 03:00 (`schedule/daily-all`) | ✅ `velero backup create <name> --default-volumes-to-fs-backup` | ✅ verified (Completed, all namespaces incl. empty ones) |
+| Velero retention (keep newest 4) | ✅ pruner CronJob 03:45 | — | ✅ config verified (`VELERO_KEEP=4`) |
+| restic — raw NFS export → S3 | ✅ daily 03:30 (`cronjob/nfs-s3-sync`) | ✅ `kubectl -n nfs-provisioner create job run --from=cronjob/nfs-s3-sync` | ✅ verified (snapshot written, keep-last-4) |
+| OpenBao — raft snapshot → S3 | ✅ daily 02:00 (`cronjob/openbao-snapshot`) | ✅ `./deploy.sh openbao-snapshot` or `create job --from=cronjob/openbao-snapshot` | ✅ verified (valid snapshot, integrity OK) |
+| DR key bundle (keys + inventory + runbook) → S3 | — (on-demand) | ✅ `./deploy.sh dr-bundle` (easy mode) / `DR_ENCRYPT=true …` | ✅ verified (recovered + extracted from S3) |
+| Backup-stopped alerts | ✅ Prometheus rules | ✅ `./deploy.sh backup-alerts` | ✅ installed |
+
+### Restore
+
+| Process | Automatic | Manual | Tested |
+|---|---|---|---|
+| Velero — restore a namespace / whole cluster | — | ✅ `./deploy.sh restore <backup> [ns]` or `velero restore create --from-backup <b>` | ✅ **byte-identical** (canary PV data md5 matched) |
+| Velero — restore an empty namespace | — | ✅ (part of a full restore) | ✅ verified (`test-rabi` came back) |
+| restic — file/volume restore from S3 | — | ✅ `restic restore latest --target …` (see above) | ✅ verified (481 files restored using the off-cluster password) |
+| OpenBao — raft snapshot restore + unseal | — | ✅ `bao operator raft snapshot restore` + unseal with saved keys | ✅ verified (`dr/canary` secret matched after restore) |
+| DR bundle recovery (get keys back) | — | ✅ `aws s3 cp … | tar -xzf -` (or `openssl` decrypt if encrypted) | ✅ verified (all keys/inventory/runbook recovered) |
+| **Full cluster loss → rebuild from S3** | — | ✅ `./deploy.sh` (platform) + full Velero restore + OpenBao snapshot | ✅ **verified twice** — every node + NFS wiped, rebuilt from S3, all data byte-identical |
+
+> Note: neither Velero (node-agent) nor restic can read OpenBao's private 0600 files
+> over the squashed NFS mount — OpenBao is protected by its **raft snapshot** instead
+> (automatic daily; restore tested). This is by design, not a gap.
+
+The step-by-step full-cluster-loss procedure is in
+[DISASTER-RECOVERY.md](DISASTER-RECOVERY.md).

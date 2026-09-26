@@ -221,8 +221,24 @@ against cluster loss; protect the bucket separately.
 
 ## Tested
 
-A namespace-level disaster (destroying `critical-app` — a 2-replica StatefulSet
-with PVCs) was fully recovered via Velero (data byte-identical) and via restic.
-A real platform namespace (Argo CD) was destroyed and restored from S3 with its
-Secrets and Application CRs intact. Full from-scratch cluster rebuild + restore
-follows the same Velero-from-S3 path described above.
+This procedure has been executed live, end to end — **not just configured**:
+
+- **Full total-loss drill (run twice):** every one of the 8 nodes *and* the NFS
+  export were wiped, then the cluster was rebuilt from `./deploy.sh` and recovered
+  from S3 alone. All data came back **byte-identical**:
+  - Velero: application PV data (md5 matched)
+  - Argo CD: `server.secretkey` (md5 matched) + its resources
+  - OpenBao: `dr/canary` secret matched after raft-snapshot restore + unseal
+  - empty namespaces (e.g. `test-rabi`) were captured and restored
+- **S3-only recovery proven:** using only the AWS login + the DR bundle (which
+  returns the restic password and OpenBao keys), the restic repo was opened and
+  481 files restored, and the OpenBao snapshot integrity was verified — all with
+  **no dependency on the old cluster**.
+
+See the process/tested matrix in [BACKUP-RESTORE.md](BACKUP-RESTORE.md#process-matrix--automatic-vs-manual-and-what-is-tested)
+for the per-path status.
+
+> Prerequisite for HTTP-01 TLS after a rebuild behind NAT: the LB's public IP must
+> forward :80/:443 to the LB host, and the ingress hostnames must resolve to the
+> ingress service *inside* the cluster (split-horizon DNS) so cert-manager's
+> self-check passes. Both are environment setup, outside this repo.
