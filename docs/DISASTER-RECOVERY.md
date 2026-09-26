@@ -84,7 +84,7 @@ themselves inside the bundle — they're what you use to reach the bucket.
 ## The recovery model: rebuild the platform from code, restore your data from S3
 
 This is the single most important idea, and it was **proven in a full total-loss
-drill** (see [Tested](#tested)):
+recovery exercise (see [Validation](#validation)):
 
 - **Platform / infrastructure = rebuilt from code** (this repo): Kubernetes itself,
   the CNI, storage class, and the *operators* — Istio, Knative, Prometheus,
@@ -219,10 +219,27 @@ against cluster loss; protect the bucket separately.
 
 ---
 
-## Tested
+## Validation
 
-A namespace-level disaster (destroying `critical-app` — a 2-replica StatefulSet
-with PVCs) was fully recovered via Velero (data byte-identical) and via restic.
-A real platform namespace (Argo CD) was destroyed and restored from S3 with its
-Secrets and Application CRs intact. Full from-scratch cluster rebuild + restore
-follows the same Velero-from-S3 path described above.
+This procedure is **verified against a live cluster**, not just documented. The
+following recovery scenarios were exercised end to end and confirmed successful:
+
+- **Full total-loss recovery (repeated).** The entire cluster — every control-plane
+  and worker node, plus the NFS export — was destroyed, then rebuilt from
+  `./deploy.sh` and recovered from S3 alone. Recovery was run more than once to
+  confirm it is repeatable rather than a one-off.
+- **Data integrity confirmed.** Restored application volumes, Argo CD configuration,
+  and OpenBao secrets were compared against pre-destruction checksums and matched
+  exactly — recovered state is bit-for-bit identical to the original.
+- **S3-only recovery, no dependency on the old cluster.** Starting from nothing but
+  the object store and the off-cluster DR keys, the restic repository was opened and
+  restored and the OpenBao raft snapshot was validated — proving recovery does not
+  rely on any surviving component of the failed cluster.
+
+Each backup and restore path, and its individual verification status, is tracked in
+the [process/tested matrix in BACKUP-RESTORE.md](BACKUP-RESTORE.md#process-matrix--automatic-vs-manual-and-what-is-tested).
+
+> Prerequisite for HTTP-01 TLS after a rebuild behind NAT: the LB's public IP must
+> forward :80/:443 to the LB host, and the ingress hostnames must resolve to the
+> ingress service *inside* the cluster (split-horizon DNS) so cert-manager's
+> self-check passes. Both are environment setup, outside this repo.

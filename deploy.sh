@@ -167,6 +167,21 @@ OPENBAO="${SET[OPENBAO]:-true}"                  # installed by default; set fal
 OPENBAO_REPLICAS="${SET[OPENBAO_REPLICAS]:-3}"
 OPENBAO_INGRESS_TYPE="${SET[OPENBAO_INGRESS_TYPE]:-ClusterIP}"
 OPENBAO_STORAGE_CLASS="${SET[OPENBAO_STORAGE_CLASS]:-}"
+# External Secrets Operator wired to OpenBao (opt-in): define secrets in OpenBao,
+# ESO syncs them into normal k8s Secrets. Needs OpenBao installed.
+EXTERNAL_SECRETS="${SET[EXTERNAL_SECRETS]:-false}"
+
+# ---- Ingress (NGINX), TLS (cert-manager/Let's Encrypt), security (Kubescape) ---
+INGRESS_NGINX="${SET[INGRESS_NGINX]:-true}"              # NGINX ingress as NodePort, fronted by HAProxy :80/:443
+INGRESS_HTTP_NODEPORT="${SET[INGRESS_HTTP_NODEPORT]:-30080}"
+INGRESS_HTTPS_NODEPORT="${SET[INGRESS_HTTPS_NODEPORT]:-30443}"
+CERT_MANAGER="${SET[CERT_MANAGER]:-true}"               # cert-manager; issuers created only if ACME_EMAIL set
+ACME_EMAIL="${SET[ACME_EMAIL]:-}"                        # Let's Encrypt contact (needed for ClusterIssuers)
+KUBESCAPE="${SET[KUBESCAPE]:-true}"                      # Kubescape security/compliance operator
+KUBESCAPE_CLUSTER_NAME="${SET[KUBESCAPE_CLUSTER_NAME]:-${CLUSTER_NAME:-kubernetes}}"
+HEADLAMP="${SET[HEADLAMP]:-true}"                        # Headlamp web dashboard + Kubescape plugin
+HEADLAMP_HOST="${SET[HEADLAMP_HOST]:-}"                  # Ingress host; default headlamp.<LB_HOST>.sslip.io
+HEADLAMP_ADMIN="${SET[HEADLAMP_ADMIN]:-false}"           # true = cluster-admin login SA (default read-only)
 
 # HA auto-detect
 if [[ ${#MASTERS[@]} -gt 1 ]]; then
@@ -200,7 +215,12 @@ provision_infra(){
     [[ -f "$HERE/scripts/lb-haproxy-setup.sh" ]] || die "scripts/lb-haproxy-setup.sh not found"
     step "0/4  provisioning HAProxy LB on $LB_HOST (user $LB_SSH_USER)"
     push_as "$LB_SSH_USER" "$LB_HOST" "$HERE/scripts/lb-haproxy-setup.sh"
-    rsh_as "$LB_SSH_USER" "$LB_HOST" "sudo bash /tmp/lb-haproxy-setup.sh ${M_IP[*]}"
+    # When NGINX ingress is enabled, also front :80/:443 -> ingress NodePorts on the workers.
+    local ING_ENV=""
+    if [[ "$INGRESS_NGINX" == true ]]; then
+      ING_ENV="INGRESS_LB=true INGRESS_NODES='${W_IP[*]:-${M_IP[*]}}' INGRESS_HTTP_NODEPORT='$INGRESS_HTTP_NODEPORT' INGRESS_HTTPS_NODEPORT='$INGRESS_HTTPS_NODEPORT'"
+    fi
+    rsh_as "$LB_SSH_USER" "$LB_HOST" "sudo $ING_ENV bash /tmp/lb-haproxy-setup.sh ${M_IP[*]}"
   fi
 }
 
@@ -326,10 +346,15 @@ cmd_install(){
   step "DONE"; rsh "$M0" "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl get nodes -o wide" || true
   [[ "$METRICS_SERVER" == true ]] && cmd_metrics
   [[ "$VPA" == true ]] && cmd_vpa
+  [[ "$INGRESS_NGINX" == true ]] && cmd_ingress_nginx
+  [[ "$CERT_MANAGER" == true ]] && cmd_cert_manager
+  [[ "$KUBESCAPE" == true ]] && cmd_kubescape
+  [[ "$HEADLAMP" == true ]] && cmd_headlamp
   [[ "$PROMETHEUS" == true ]] && cmd_prometheus
   [[ "$KNATIVE" == true ]] && cmd_knative
   [[ "$ARGOCD" == true ]] && cmd_argocd
   [[ "$OPENBAO" == true ]] && cmd_openbao
+  [[ "$EXTERNAL_SECRETS" == true && "$OPENBAO" == true ]] && cmd_external_secrets
   [[ "$VELERO" == true ]] && cmd_velero
   [[ "$NFS_S3_SYNC" == true ]] && cmd_nfs_s3
   [[ "$BACKUP_ALERTS" == true && "$PROMETHEUS" == true ]] && cmd_backup_alerts
@@ -407,6 +432,49 @@ cmd_nfs_s3(){
   local M0="${M_IP[0]}"; step "installing NFS->S3 sync (via $M0)"
   push_as "$SSH_USER" "$M0" "$HERE/scripts/13-nfs-s3-sync.sh"
   rsh "$M0" "sudo NFS_S3_BUCKET='$NFS_S3_BUCKET' NFS_S3_PREFIX='$NFS_S3_PREFIX' NFS_S3_STORAGE_CLASS='$NFS_S3_STORAGE_CLASS' NFS_S3_KEEP='$NFS_S3_KEEP' AWS_REGION='$AWS_REGION' AWS_ACCESS_KEY_ID='$AWS_ACCESS_KEY_ID' AWS_SECRET_ACCESS_KEY='$AWS_SECRET_ACCESS_KEY' NFS_SERVER='$NFS_SERVER' NFS_PATH='$NFS_PATH' bash /tmp/13-nfs-s3-sync.sh"
+}
+
+# Install the NGINX ingress controller (NodePort; HAProxy fronts :80/:443).
+cmd_ingress_nginx(){
+  [[ -f "$HERE/scripts/18-ingress-nginx.sh" ]] || die "scripts/18-ingress-nginx.sh not found"
+  local M0="${M_IP[0]}"; step "installing NGINX ingress (NodePort $INGRESS_HTTP_NODEPORT/$INGRESS_HTTPS_NODEPORT, via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/18-ingress-nginx.sh"
+  rsh "$M0" "sudo INGRESS_HTTP_NODEPORT='$INGRESS_HTTP_NODEPORT' INGRESS_HTTPS_NODEPORT='$INGRESS_HTTPS_NODEPORT' bash /tmp/18-ingress-nginx.sh"
+}
+
+# Install cert-manager (+ Let's Encrypt ClusterIssuers when ACME_EMAIL is set).
+cmd_cert_manager(){
+  [[ -f "$HERE/scripts/19-cert-manager.sh" ]] || die "scripts/19-cert-manager.sh not found"
+  local M0="${M_IP[0]}"; step "installing cert-manager${ACME_EMAIL:+ + LetsEncrypt issuers} (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/19-cert-manager.sh"
+  rsh "$M0" "sudo ACME_EMAIL='$ACME_EMAIL' INGRESS_CLASS=nginx bash /tmp/19-cert-manager.sh"
+}
+
+# Install the Kubescape security/compliance operator.
+cmd_kubescape(){
+  [[ -f "$HERE/scripts/20-kubescape.sh" ]] || die "scripts/20-kubescape.sh not found"
+  local M0="${M_IP[0]}"; step "installing Kubescape operator (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/20-kubescape.sh"
+  rsh "$M0" "sudo KUBESCAPE_CLUSTER_NAME='$KUBESCAPE_CLUSTER_NAME' bash /tmp/20-kubescape.sh"
+}
+
+# Install Headlamp (open-source web dashboard) with the Kubescape plugin.
+cmd_headlamp(){
+  [[ -f "$HERE/scripts/21-headlamp.sh" ]] || die "scripts/21-headlamp.sh not found"
+  local host="$HEADLAMP_HOST"
+  [[ -z "$host" && -n "$LB_HOST" ]] && host="headlamp.${LB_HOST}.sslip.io"   # reachable via HAProxy, no DNS needed
+  local M0="${M_IP[0]}"; step "installing Headlamp dashboard${host:+ (http://$host/)} (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/21-headlamp.sh"
+  rsh "$M0" "sudo HEADLAMP_HOST='$host' INGRESS_CLASS=nginx HEADLAMP_ADMIN='$HEADLAMP_ADMIN' bash /tmp/21-headlamp.sh"
+}
+
+# Install External Secrets Operator and wire it to OpenBao (define secrets in
+# OpenBao, ESO syncs them into normal k8s Secrets).
+cmd_external_secrets(){
+  [[ -f "$HERE/scripts/17-external-secrets.sh" ]] || die "scripts/17-external-secrets.sh not found"
+  local M0="${M_IP[0]}"; step "installing External Secrets Operator + OpenBao store (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/17-external-secrets.sh"
+  rsh "$M0" "sudo bash /tmp/17-external-secrets.sh"
 }
 
 # Install the automated OpenBao raft-snapshot -> S3 CronJob (no passphrase needed).
@@ -611,11 +679,16 @@ case "$ACTION" in
   backup-alerts) cmd_backup_alerts ;;
   dr-bundle)  cmd_dr_bundle ;;
   openbao-snapshot) cmd_openbao_snapshot ;;
+  external-secrets) cmd_external_secrets ;;
+  ingress-nginx) cmd_ingress_nginx ;;
+  cert-manager) cmd_cert_manager ;;
+  kubescape)  cmd_kubescape ;;
+  headlamp)   cmd_headlamp ;;
   dr-protect) cmd_dr_protect ;;
   backups)    cmd_backups ;;
   restore)    shift; cmd_restore "$@" ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | dr-bundle | openbao-snapshot | dr-protect | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | dr-bundle | openbao-snapshot | external-secrets | ingress-nginx | cert-manager | kubescape | headlamp | dr-protect | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
 esac
