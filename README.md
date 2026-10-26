@@ -70,6 +70,7 @@ detailed/advanced reference.
 - [Knative (Serving + Eventing) on Istio](#knative-serving--eventing-on-istio)
 - [Argo CD (GitOps)](#argo-cd-gitops)
 - [OpenBao (secret manager)](#openbao-secret-manager)
+- [Namespace isolation (Istio)](#namespace-isolation-istio)
 - [Backups to S3 (Velero + raw NFS sync)](#backups-to-s3-velero--raw-nfs-sync)
 - [Upgrading](#upgrading)
 - [Tear down / reset](#tear-down--reset)
@@ -278,6 +279,8 @@ credentials and is git-ignored — keep it safe.)
 ./deploy.sh knative             # install Knative (Serving/Eventing) on Istio
 ./deploy.sh argocd              # install Argo CD (GitOps)
 ./deploy.sh openbao             # install OpenBao (HA Raft secret manager)
+./deploy.sh ns-isolation isolate my-ns          # isolate a namespace (Istio; works on Flannel)
+./deploy.sh ns-isolation allow my-ns other-ns   # let an isolated namespace reach another one
 ./deploy.sh kubeconfig          # fetch admin kubeconfig to ./kubeconfig
 ./deploy.sh upgrade 1.37.0      # rolling upgrade the whole cluster
 ./deploy.sh reset               # tear the cluster down
@@ -738,6 +741,30 @@ UI — Headlamp is the self-hosted way to view its data.)
 
 ---
 
+## Namespace isolation (Istio)
+
+Make a namespace unable to reach other namespaces (e.g. `openbao`) while other namespaces
+can still call into it. It uses the Istio sidecar installed by `./deploy.sh knative`, so it
+works on **Flannel** without a NetworkPolicy-capable CNI.
+
+```bash
+./deploy.sh ns-isolation isolate my-ns                 # or on a master: sudo ./scripts/22-namespace-isolation.sh isolate my-ns
+./deploy.sh ns-isolation allow my-ns shared-db         # let it reach one other namespace
+./deploy.sh ns-isolation allow-external my-ns api.example.com
+./deploy.sh ns-isolation status my-ns
+./deploy.sh ns-isolation remove my-ns
+```
+
+A new namespace is **not** isolated automatically — run the command for each one. System
+namespaces are refused, and a namespace that already has pods needs
+`ISOLATION_ALLOW_EXISTING=true`. This is a **soft boundary** (enforced by the sidecar, not
+the network); see the limits in the guides:
+
+- [docs/NAMESPACE-ISOLATION.md](docs/NAMESPACE-ISOLATION.md) — isolate a new or existing namespace, verify, deploy into it, remove
+- [docs/NAMESPACE-ACCESS.md](docs/NAMESPACE-ACCESS.md) — let an isolated namespace reach another namespace or an external host
+
+---
+
 ## Backups to S3 (Velero + raw NFS sync)
 
 Two complementary backups, both to **AWS S3**. Put the bucket + credentials in a
@@ -916,6 +943,9 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `scripts/06-knative-istio.sh` | install Knative (Serving/Eventing) on Istio + sidecar injection |
 | `scripts/07-argocd.sh` | install Argo CD (GitOps continuous delivery) |
 | `scripts/08-openbao.sh` | install OpenBao (HA Raft secret manager) + init/unseal |
+| `scripts/22-namespace-isolation.sh` | isolate a namespace with Istio (`isolate`/`allow`/`unallow`/`allow-external`/`status`/`remove`) |
+| `docs/NAMESPACE-ISOLATION.md` | guide: isolate a new/existing namespace, verify, deploy into it |
+| `docs/NAMESPACE-ACCESS.md` | guide: let an isolated namespace reach another namespace or an external host |
 | `scripts/05-upgrade.sh` | modular: per-node upgrade |
 | `scripts/list-versions.sh` | list installable Kubernetes versions |
 | `scripts/lib.sh` / `config/cluster.env` | shared helpers / config for the modular scripts |
@@ -969,7 +999,9 @@ them. (Best planned up front; converting a live single-master cluster needs
 care.)
 
 **Flannel or Calico?**  Flannel is the simplest (default). Choose Calico if you
-need NetworkPolicies/advanced networking — remember to use its `POD_CIDR`.
+need NetworkPolicies/advanced networking — remember to use its `POD_CIDR`. On
+Flannel you can still isolate namespaces with Istio (a soft boundary, enforced by the
+sidecar) — see [Namespace isolation](#namespace-isolation-istio).
 
 **Windows?**  The nodes are Linux. Run `deploy.sh` from WSL/Git Bash/macOS/Linux
 (it needs `ssh`/`scp`), not native PowerShell.
