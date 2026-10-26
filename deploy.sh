@@ -13,6 +13,7 @@
 #    ./deploy.sh openbao         # install OpenBao (HA Raft secret manager)
 #    ./deploy.sh ns-isolation isolate my-ns [allow-ns,...]   # isolate a namespace (Istio)
 #    ./deploy.sh ns-isolation allow my-ns other-ns           # let it reach another namespace
+#    ./deploy.sh auto-isolation install                      # auto-isolate every NEW namespace (Kyverno)
 #    ./deploy.sh add-worker w6 10.0.0.26 [pw]   # join ONE new worker later
 #    ./deploy.sh remove-worker prod1-...-w6 [ip] # drain + remove a worker
 #    ./deploy.sh storage         # (re)install storage (Longhorn or NFS) only
@@ -482,6 +483,17 @@ cmd_ns_isolation(){
   rsh "$M0" "sudo ISOLATION_ADMISSION='${ISOLATION_ADMISSION:-true}' ISOLATION_ALLOW_EXISTING='${ISOLATION_ALLOW_EXISTING:-false}' ISOLATION_FORCE='${ISOLATION_FORCE:-false}' ISOLATION_YES='${ISOLATION_YES:-false}' DRY_RUN='${DRY_RUN:-false}' bash /tmp/22-namespace-isolation.sh $args"
 }
 
+# Auto-isolate every NEW namespace (installs Kyverno + policies). Existing namespaces are untouched.
+#   ./deploy.sh auto-isolation install|status [ns]|remove
+cmd_auto_isolation(){
+  [[ $# -ge 1 ]] || die "usage: auto-isolation install|status [ns]|remove"
+  [[ -f "$HERE/scripts/23-auto-isolation.sh" ]] || die "scripts/23-auto-isolation.sh not found"
+  local M0="${M_IP[0]}" args; printf -v args '%q ' "$@"
+  step "auto namespace isolation: $1 (via $M0)"
+  push_as "$SSH_USER" "$M0" "$HERE/scripts/23-auto-isolation.sh"
+  rsh "$M0" "sudo KYVERNO_VERSION='${KYVERNO_VERSION:-}' AUTO_ISOLATION_EXCLUDE='${AUTO_ISOLATION_EXCLUDE:-}' REMOVE_KYVERNO='${REMOVE_KYVERNO:-false}' DRY_RUN='${DRY_RUN:-false}' bash /tmp/23-auto-isolation.sh $args"
+}
+
 # Install External Secrets Operator and wire it to OpenBao (define secrets in
 # OpenBao, ESO syncs them into normal k8s Secrets).
 cmd_external_secrets(){
@@ -699,11 +711,12 @@ case "$ACTION" in
   kubescape)  cmd_kubescape ;;
   headlamp)   cmd_headlamp ;;
   ns-isolation) shift; cmd_ns_isolation "$@" ;;
+  auto-isolation) shift; cmd_auto_isolation "$@" ;;
   dr-protect) cmd_dr_protect ;;
   backups)    cmd_backups ;;
   restore)    shift; cmd_restore "$@" ;;
   kubeconfig) fetch_kubeconfig ;;
   upgrade)    shift; cmd_upgrade "$@" ;;
   reset)      cmd_reset ;;
-  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | dr-bundle | openbao-snapshot | external-secrets | ingress-nginx | cert-manager | kubescape | headlamp | ns-isolation <isolate|allow|unallow|allow-external|status|remove> <ns> [args] | dr-protect | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
+  *) die "unknown action: $ACTION (use: check | bootstrap | install | provision | add-worker <name> <ip> [pw] | remove-worker <node> [ip] | storage | metrics | vpa | prometheus | knative | argocd | openbao | velero | nfs-s3-sync | backup-alerts | dr-bundle | openbao-snapshot | external-secrets | ingress-nginx | cert-manager | kubescape | headlamp | ns-isolation <isolate|allow|unallow|allow-external|status|remove> <ns> [args] | auto-isolation <install|status|remove> | dr-protect | backups | restore <backup> [ns] | kubeconfig | upgrade <ver> | reset)";;
 esac
