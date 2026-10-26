@@ -6,6 +6,7 @@
 #   - label istio-injection=enabled
 #   - Sidecar/default (REGISTRY_ONLY, egress ./*)
 #   - ValidatingAdmissionPolicy + binding (pods must run istio-proxy; no hostNetwork)
+#   - AuthorizationPolicy (only the namespace itself may call INTO it)
 # Namespaces that ALREADY exist are NOT touched (they keep talking to each other).
 # Open a new namespace up afterwards with scripts/22-namespace-isolation.sh allow ...
 #
@@ -37,6 +38,7 @@ export KUBECONFIG="${KUBECONFIG:-/etc/kubernetes/admin.conf}"
 
 LBL_KEY="psc.nubo-native-platform.io/isolation"
 ANN_KEY="psc.nubo-native-platform.io/allowed-namespaces"
+ANN_FROM="psc.nubo-native-platform.io/allowed-callers"
 
 g='\033[0;32m'; y='\033[0;33m'; r='\033[0;31m'; n='\033[0m'
 log(){ echo -e "${g}[+]${n} $*"; }; warn(){ echo -e "${y}[!]${n} $*"; }; die(){ echo -e "${r}[x]${n} $*" >&2; exit 1; }
@@ -45,7 +47,7 @@ log(){ echo -e "${g}[+]${n} $*"; }; warn(){ echo -e "${y}[!]${n} $*"; }; die(){ 
 SKIP="kube-* default istio-system istio-ingress knative-serving knative-eventing argocd openbao velero \
 monitoring ingress-nginx cert-manager external-secrets kubescape headlamp longhorn-system nfs-provisioner ${KYVERNO_NS}"
 
-usage(){ sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage(){ sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 apply(){ if [[ "$DRY_RUN" == true ]]; then echo "# ---- [dry-run] would apply ----"; cat; echo; else kubectl apply -f -; fi; }
 
@@ -68,6 +70,9 @@ metadata:
 rules:
 - apiGroups: ["networking.istio.io"]
   resources: ["sidecars"]
+  verbs: ["create", "get", "list", "update", "patch", "delete"]
+- apiGroups: ["security.istio.io"]
+  resources: ["authorizationpolicies"]
   verbs: ["create", "get", "list", "update", "patch", "delete"]
 - apiGroups: ["admissionregistration.k8s.io"]
   resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
@@ -149,6 +154,39 @@ ${skip}
           egress:
           - hosts:
             - "./*"
+  - name: inbound-policy
+    match:
+      any:
+      - resources:
+          kinds: ["Namespace"]
+          operations: ["CREATE"]
+    exclude:
+      any:
+      - resources:
+          names:
+${skip}
+      - resources:
+          selector:
+            matchLabels:
+              ${LBL_KEY}: "off"
+    generate:
+      apiVersion: security.istio.io/v1
+      kind: AuthorizationPolicy
+      name: isolation-ingress
+      namespace: "{{request.object.metadata.name}}"
+      synchronize: false
+      data:
+        metadata:
+          labels:
+            ${LBL_KEY}: "true"
+          annotations:
+            ${ANN_FROM}: ""
+        spec:
+          action: ALLOW
+          rules:
+          - from:
+            - source:
+                namespaces: ["{{request.object.metadata.name}}"]
   - name: admission-policy
     match:
       any:

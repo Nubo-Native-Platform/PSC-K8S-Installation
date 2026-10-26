@@ -17,6 +17,8 @@
 #   sudo ./scripts/22-namespace-isolation.sh allow <ns> <other-ns> [<other-ns> ...]
 #   sudo ./scripts/22-namespace-isolation.sh unallow <ns> <other-ns> [<other-ns> ...]
 #   sudo ./scripts/22-namespace-isolation.sh allow-external <ns> <host> [port] [TLS|HTTP]
+#   sudo ./scripts/22-namespace-isolation.sh allow-from <ns> <caller-ns> [<caller-ns> ...]    # let others call INTO <ns>
+#   sudo ./scripts/22-namespace-isolation.sh unallow-from <ns> <caller-ns> [...]
 #   sudo ./scripts/22-namespace-isolation.sh status <ns>
 #   sudo ./scripts/22-namespace-isolation.sh remove <ns>
 #
@@ -36,6 +38,7 @@ DRY_RUN="${DRY_RUN:-false}"
 export KUBECONFIG="${KUBECONFIG:-/etc/kubernetes/admin.conf}"
 
 ANN_KEY="psc.nubo-native-platform.io/allowed-namespaces"
+ANN_FROM="psc.nubo-native-platform.io/allowed-callers"
 LBL_KEY="psc.nubo-native-platform.io/isolation"
 
 g='\033[0;32m'; y='\033[0;33m'; r='\033[0;31m'; n='\033[0m'
@@ -46,7 +49,7 @@ PROTECTED="default kube-system kube-public kube-node-lease kube-flannel istio-sy
 knative-serving knative-eventing argocd openbao velero monitoring ingress-nginx cert-manager \
 external-secrets kubescape headlamp longhorn-system nfs-provisioner"
 
-usage(){ sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage(){ sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 # ---- helpers -----------------------------------------------------------------
 valid_ns(){ [[ "$1" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && ${#1} -le 63 ]]; }
@@ -76,6 +79,11 @@ get_allowed(){
   kubectl -n "$1" get sidecar default -o "jsonpath={.metadata.annotations.psc\\.nubo-native-platform\\.io/allowed-namespaces}" 2>/dev/null || true
 }
 
+get_callers(){
+  kubectl -n "$1" get authorizationpolicy isolation-ingress -o "jsonpath={.metadata.annotations.psc\.nubo-native-platform\.io/allowed-callers}" 2>/dev/null || true
+}
+has_authz(){ kubectl -n "$1" get authorizationpolicy isolation-ingress >/dev/null 2>&1; }
+
 # ---- renderers ---------------------------------------------------------------
 render_sidecar(){   # $1=ns  $2=csv of allowed namespaces
   local ns="$1" csv="$2" x
@@ -99,6 +107,32 @@ spec:
 EOF
   IFS=',' read -ra a <<<"$csv" || true
   for x in "${a[@]:-}"; do [[ -n "$x" ]] && echo "    - \"${x}/*\""; done
+  return 0
+}
+
+render_authz(){     # $1=ns  $2=csv of namespaces allowed to call INTO ns
+  local ns="$1" csv="$2" x
+  local -a a=()
+  cat <<EOF
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: isolation-ingress
+  namespace: ${ns}
+  labels:
+    ${LBL_KEY}: "true"
+  annotations:
+    ${ANN_FROM}: "${csv}"
+spec:
+  action: ALLOW
+  rules:
+  - from:
+    - source:
+        namespaces:
+        - "${ns}"
+EOF
+  IFS=',' read -ra a <<<"$csv" || true
+  for x in "${a[@]:-}"; do [[ -n "$x" ]] && echo "        - \"${x}\""; done
   return 0
 }
 
@@ -207,6 +241,9 @@ cmd_isolate(){
   log "applying Sidecar (egress: ./*${csv:+, ${csv//,/, }}) in $ns"
   render_sidecar "$ns" "$csv" | apply
 
+  log "applying AuthorizationPolicy (only $ns itself may call into it) in $ns"
+  render_authz "$ns" "" | apply
+
   if [[ "$ISOLATION_ADMISSION" == true ]]; then
     local apis; apis="$(kubectl api-resources --api-group=admissionregistration.k8s.io -o name 2>/dev/null || true)"
     if [[ "$apis" == *validatingadmissionpolicies* ]]; then
@@ -244,6 +281,13 @@ cmd_allow(){
   done
   log "updating Sidecar in $ns (allowed: ${csv:-none})"
   render_sidecar "$ns" "$csv" | apply
+  for x in "$@"; do
+    [[ "$x" == "$ns" ]] && continue
+    if has_authz "$x"; then
+      log "'$x' is isolated too — letting $ns call into it"
+      render_authz "$x" "$(csv_add "$(get_callers "$x")" "$ns")" | apply
+    fi
+  done
   warn "this lets EVERY pod in '$ns' call ALL services in: $*  (it is namespace-wide, not per workload)"
 }
 
@@ -255,6 +299,29 @@ cmd_unallow(){
   for x in "$@"; do csv="$(csv_del "$csv" "$x")"; done
   log "updating Sidecar in $ns (allowed: ${csv:-none})"
   render_sidecar "$ns" "$csv" | apply
+  for x in "$@"; do
+    if has_authz "$x"; then render_authz "$x" "$(csv_del "$(get_callers "$x")" "$ns")" | apply; fi
+  done
+}
+
+cmd_allow_from(){
+  local ns="${1:-}"; shift || true
+  [[ $# -ge 1 ]] || die "usage: allow-from <ns> <caller-ns> [<caller-ns> ...]"
+  need_isolated "$ns"; has_authz "$ns" || die "'$ns' has no AuthorizationPolicy — re-run isolate on it"
+  local csv x; csv="$(get_callers "$ns")"
+  for x in "$@"; do valid_ns "$x" || die "invalid namespace name: $x"; csv="$(csv_add "$csv" "$x")"; done
+  log "letting ${*} call into $ns"
+  render_authz "$ns" "$csv" | apply
+  warn "callers must have an Istio sidecar (istio-injection=enabled); pods without one have no identity and stay blocked"
+}
+
+cmd_unallow_from(){
+  local ns="${1:-}"; shift || true
+  [[ $# -ge 1 ]] || die "usage: unallow-from <ns> <caller-ns> [<caller-ns> ...]"
+  need_isolated "$ns"; has_authz "$ns" || die "'$ns' has no AuthorizationPolicy"
+  local csv x; csv="$(get_callers "$ns")"
+  for x in "$@"; do csv="$(csv_del "$csv" "$x")"; done
+  render_authz "$ns" "$csv" | apply
 }
 
 cmd_allow_external(){
@@ -284,6 +351,9 @@ cmd_status(){
   else
     echo "   NONE — namespace is NOT isolated"
   fi
+  echo "== inbound (AuthorizationPolicy)"
+  kubectl -n "$ns" get authorizationpolicy isolation-ingress -o jsonpath='   allowed callers: {.metadata.annotations.psc\.nubo-native-platform\.io/allowed-callers} (plus the namespace itself){"
+"}' 2>/dev/null || echo "   NONE — other namespaces can call into $ns"
   echo "== external hosts allowed (ServiceEntry)"
   kubectl -n "$ns" get serviceentry -l "${LBL_KEY}=ext" --no-headers 2>/dev/null | sed 's/^/   /' || true
   echo "== admission policy"
@@ -306,6 +376,7 @@ cmd_remove(){
   run kubectl delete validatingadmissionpolicybinding "${ns}-require-sidecar" --ignore-not-found
   run kubectl delete validatingadmissionpolicy "${ns}-require-sidecar" --ignore-not-found
   run kubectl -n "$ns" delete serviceentry -l "${LBL_KEY}=ext" --ignore-not-found
+  run kubectl -n "$ns" delete authorizationpolicy isolation-ingress --ignore-not-found
   run kubectl -n "$ns" delete sidecar default --ignore-not-found
   run kubectl label namespace "$ns" istio-injection- || true
   warn "running pods keep their sidecar until restarted; only egress blocking is removed"
@@ -318,9 +389,11 @@ case "$sub" in
   allow)          cmd_allow "$@" ;;
   unallow)        cmd_unallow "$@" ;;
   allow-external) cmd_allow_external "$@" ;;
+  allow-from)     cmd_allow_from "$@" ;;
+  unallow-from)   cmd_unallow_from "$@" ;;
   status)         cmd_status "$@" ;;
   remove)         cmd_remove "$@" ;;
   -h|--help|help) usage 0 ;;
   "")             usage 1 ;;
-  *)              die "unknown command: $sub (use: isolate | allow | unallow | allow-external | status | remove)" ;;
+  *)              die "unknown command: $sub (use: isolate | allow | unallow | allow-from | unallow-from | allow-external | status | remove)" ;;
 esac

@@ -175,6 +175,17 @@ readable — scope its policy accordingly.
 
 ## 5. The other direction (inbound)
 
+Isolated namespaces now also **block inbound** calls from other namespaces. Open it with:
+
+```bash
+sudo ./scripts/22-namespace-isolation.sh allow-from my-ns caller-ns   # caller-ns may call INTO my-ns
+sudo ./scripts/22-namespace-isolation.sh unallow-from my-ns caller-ns
+```
+
+`allow A B` lets A call B and, if B is isolated, also lets A call into B. Callers need a sidecar.
+
+(older note follows)
+
 Other namespaces can already call **into** an isolated namespace; nothing to configure. That
 includes the ingress controller and Prometheus scraping.
 

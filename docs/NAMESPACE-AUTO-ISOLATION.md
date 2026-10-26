@@ -22,9 +22,9 @@ bash deploy.sh auto-isolation remove       # stop auto-isolating; already isolat
 
 | Step | Result |
 |------|--------|
-| `kubectl create namespace foo` (or Helm / Argo CD) | label `istio-injection=enabled` added; `Sidecar/default` (`REGISTRY_ONLY`) and the `foo-require-sidecar` admission policy + binding generated |
+| `kubectl create namespace foo` (or Helm / Argo CD) | label `istio-injection=enabled` added; `Sidecar/default` (`REGISTRY_ONLY`), `AuthorizationPolicy/isolation-ingress` and the `foo-require-sidecar` admission policy + binding generated |
 | pods in `foo` | get the sidecar, can only call services in `foo` |
-| other namespaces → `foo` | still allowed |
+| other namespaces → `foo` | **blocked** (generated `AuthorizationPolicy`); open with `allow-from` |
 | `foo` needs another namespace / external host | `22-namespace-isolation.sh allow foo <ns>` / `allow-external` ([NAMESPACE-ACCESS.md](NAMESPACE-ACCESS.md)) |
 
 The generated objects are created once and not kept in sync, so `allow` / `unallow` / edits stick.
@@ -65,6 +65,7 @@ Clean up with `kubectl delete namespace rabi-1663 rabi-1664`.
 
 - The generate runs a moment **after** the namespace is created; a pod created in that gap may
   start without the sidecar. Create workloads after `kubectl get sidecar default -n <ns>` succeeds.
+- Callers without a sidecar are denied inbound, including ingress-nginx and Prometheus; test before putting an app behind ingress.
 - New namespaces cannot reach the Kubernetes API (`default`), OpenBao, or any other namespace until allowed.
 - If Kyverno is down, new namespaces are created **without** isolation (webhook fails open).
 - Same soft-boundary limits as manual isolation (Flannel does not enforce NetworkPolicy).
