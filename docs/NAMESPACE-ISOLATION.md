@@ -18,16 +18,17 @@ To let an isolated namespace reach something specific afterwards, see
 | pod → same namespace | allowed |
 | pod → another namespace (e.g. `openbao`) | **blocked** |
 | pod → internet / external host | **blocked** (unless you allow it) |
-| another namespace → this namespace | allowed (unchanged) |
+| another namespace → this namespace | **blocked** (`AuthorizationPolicy`); open with `allow-from` |
 | new pod **without** the `istio-proxy` sidecar, or with `hostNetwork` | **rejected** at creation |
 
-It is built from three objects, all scoped to the one namespace — nothing mesh-wide,
+It is built from four objects, all scoped to the one namespace — nothing mesh-wide,
 no change to Istio, the CNI, or any other namespace:
 
 1. namespace label `istio-injection=enabled` — pods get the `istio-proxy` sidecar
 2. `Sidecar/default` with `outboundTrafficPolicy: REGISTRY_ONLY` and `egress: ["./*"]`
    — the sidecar only knows services in its own namespace, so calls elsewhere fail
-3. `ValidatingAdmissionPolicy` + binding — stops anyone skipping the sidecar
+3. `AuthorizationPolicy/isolation-ingress` — only the namespace itself may call into it (callers need a sidecar; unmeshed callers such as ingress-nginx or Prometheus are blocked until allowed, see NAMESPACE-ACCESS.md)
+4. `ValidatingAdmissionPolicy` + binding — stops anyone skipping the sidecar
    (`sidecar.istio.io/inject: "false"`) or using `hostNetwork`
 
 ## Isolating a NEW namespace
@@ -212,7 +213,7 @@ Isolation is enforced by the sidecar, so it is a **soft boundary**:
   iptables rules and bypass the proxy. The admission rule only blocks the easy bypasses.
 - Non-HTTP traffic that skips the proxy is not blocked at the network level.
 - Flannel does **not** enforce `NetworkPolicy`, so there is no network-level fallback.
-- **Inbound is not restricted.** Any namespace can call into an isolated one.
+- Inbound is enforced by the destination sidecar, so a caller without a sidecar has no identity and is simply denied. This **(not tested live)** blocks the ingress controller and Prometheus too unless their namespace is meshed or you accept that.
 
 For a **hard** boundary you need a policy-capable CNI. On Flannel the least disruptive route
 is Calico policy on top of Flannel ("Canal"). That is a cluster-wide CNI change: rehearse it

@@ -755,7 +755,7 @@ works on **Flannel** without a NetworkPolicy-capable CNI.
 ./deploy.sh ns-isolation remove my-ns
 ```
 
-A new namespace is **not** isolated automatically — run the command for each one. System
+A new namespace is **not** isolated automatically unless you enable `./deploy.sh auto-isolation install` (Kyverno; new namespaces only, see [docs/NAMESPACE-AUTO-ISOLATION.md](docs/NAMESPACE-AUTO-ISOLATION.md)) — otherwise run the command for each one. System
 namespaces are refused, and a namespace that already has pods needs
 `ISOLATION_ALLOW_EXISTING=true`. This is a **soft boundary** (enforced by the sidecar, not
 the network); see the limits in the guides:
@@ -945,6 +945,8 @@ Used by both `inventory.conf` (`[settings]`) and the one-liner (env vars):
 | `scripts/08-openbao.sh` | install OpenBao (HA Raft secret manager) + init/unseal |
 | `scripts/22-namespace-isolation.sh` | isolate a namespace with Istio (`isolate`/`allow`/`unallow`/`allow-external`/`status`/`remove`) |
 | `docs/NAMESPACE-ISOLATION.md` | guide: isolate a new/existing namespace, verify, deploy into it |
+| `scripts/23-auto-isolation.sh` | auto-isolate every NEW namespace (Kyverno policies; existing namespaces untouched) |
+| `docs/NAMESPACE-AUTO-ISOLATION.md` | guide: enable, opt out, test auto-isolation |
 | `docs/NAMESPACE-ACCESS.md` | guide: let an isolated namespace reach another namespace or an external host |
 | `scripts/05-upgrade.sh` | modular: per-node upgrade |
 | `scripts/list-versions.sh` | list installable Kubernetes versions |

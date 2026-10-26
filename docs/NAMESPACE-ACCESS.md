@@ -16,6 +16,8 @@ services in itself. This guide covers how to open **specific, deliberate** excep
 > only for the YAML they generate (against a stubbed `kubectl`) — **try each one in a
 > throwaway namespace before relying on it**, and use the verification steps at the end.
 
+> **Changes take ~10–15 seconds** to reach the sidecars. If a test still shows the old result, wait and retry before assuming a bug (seen live on Prod1).
+
 ## How the allow list works
 
 The isolated namespace has one `Sidecar/default`. Its `egress.hosts` is the allow list:
@@ -174,6 +176,17 @@ whoever has rights in `my-ns`; the `ClusterSecretStore` decides which OpenBao pa
 readable — scope its policy accordingly.
 
 ## 5. The other direction (inbound)
+
+Isolated namespaces now also **block inbound** calls from other namespaces. Open it with:
+
+```bash
+sudo ./scripts/22-namespace-isolation.sh allow-from my-ns caller-ns   # caller-ns may call INTO my-ns
+sudo ./scripts/22-namespace-isolation.sh unallow-from my-ns caller-ns
+```
+
+`allow A B` lets A call B and, if B is isolated, also lets A call into B. Callers need a sidecar.
+
+(older note follows)
 
 Other namespaces can already call **into** an isolated namespace; nothing to configure. That
 includes the ingress controller and Prometheus scraping.
